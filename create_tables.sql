@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS units (
 	name  TEXT NOT NULL COLLATE NOCASE,
 	hp    INT  NOT NULL,
 	size  INT  NOT NULL CHECK(size >= 1 AND size <= 10),
-    mount
+    mount INT,
+	corider INT
 );
 
 CREATE TABLE IF NOT EXISTS unit_props (
