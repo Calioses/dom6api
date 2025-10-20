@@ -1,8 +1,5 @@
 package main
 
-
-package main
-
 import (
 	"database/sql"
 	"encoding/json"
@@ -23,6 +20,81 @@ type Entity struct {
 	Name       string `json:"name"`
 	Table      string `json:"-"`
 	Screenshot string `json:"screenshot"`
+}
+
+type Item struct {
+	Entity
+	Type       string `json:"type"`
+	ConstLevel int    `json:"constlevel"`
+	MainLevel  int    `json:"mainlevel"`
+	MPath      string `json:"mpath"`
+	GemCost    string `json:"gemcost"`
+}
+
+type Merc struct {
+	Entity
+	BossName    string `json:"bossname"`
+	CommanderID int    `json:"commander_id"`
+	UnitID      int    `json:"unit_id"`
+	NRUnits     int    `json:"nrunits"`
+}
+
+type Site struct {
+	Entity
+	Path   string            `json:"path"`
+	Level  int               `json:"level"`
+	Rarity string            `json:"rarity"`
+	Props  map[string]string `json:"props"`
+}
+
+type Spell struct {
+	Entity
+	GemCost       string `json:"gemcost"`
+	MPath         string `json:"mpath"`
+	Type          string `json:"type"`
+	School        string `json:"school"`
+	ResearchLevel int    `json:"researchlevel"`
+}
+
+type Unit struct {
+	Entity
+	HP    int                 `json:"hp"`
+	Size  int                 `json:"size"`
+	Props map[string][]string `json:"props"`
+}
+
+// TODO figure out what this function was for
+func NewUnit(props map[string][]string) *Unit {
+	if paths, ok := props["randompaths"]; ok {
+		decoded := make([]string, len(paths))
+		for i, p := range paths {
+			decoded[i] = p // in Go, JSON decode would be done separately if needed
+		}
+		props["randompaths"] = decoded
+	}
+	return &Unit{Props: props}
+}
+
+// TODO figure out what this function was for
+func NewSite(props map[string]string) *Site {
+	excluded := map[string]struct{}{
+		"F":   {},
+		"A":   {},
+		"W":   {},
+		"E":   {},
+		"S":   {},
+		"D":   {},
+		"N":   {},
+		"B":   {},
+		"loc": {},
+	}
+	cleanProps := make(map[string]string)
+	for k, v := range props {
+		if _, ok := excluded[k]; !ok {
+			cleanProps[k] = v
+		}
+	}
+	return &Site{Props: cleanProps}
 }
 
 const DBFile = "Data/dom6api.db"
@@ -167,4 +239,7 @@ func ScreenshotForID(table string, id int) (string, error) {
 	return pngFile, nil
 }
 
+//TODO re-add all the edgecases from the previous app
 //TODO add mount edgcases. Mount, co-rider
+//TODO add glamour
+//TODO trim
