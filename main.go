@@ -11,44 +11,54 @@ import (
 	"strings"
 
 	"github.com/lithammer/fuzzysearch/fuzzy"
+
 	_ "modernc.org/sqlite"
 )
 
 const (
-	DBFile = "Data/dom6api.db"
-
-	ItemTable  = "items"
-	MercTable  = "mercs"
-	SpellTable = "spells"
-	UnitTable  = "units"
-	SiteTable  = "sites"
-
+	DBFile     = "Data/dom6api.db"
 	FuzzyScore = 70
 )
 
 var (
-	cleanRe      = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
-	tableColumns = map[string][]string{}
+	tables          = []string{"items", "spells", "units", "sites", "mercs"}
+	cleanRe         = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
+	tableColumns    = map[string][]string{}
+	tableColumnSets = make(map[string]map[string]struct{})
 )
 
-type (
-	Entity struct {
-		ID         int    `json:"id"`
-		Name       string `json:"name"`
-		Table      string `json:"-"`
-		Screenshot string `json:"screenshot"`
+// ------------------- API -----------------
+func initDB(filename string, tables []string) (*sql.DB, error) {
+	diskDB, err := sql.Open("sqlite", filename)
+	if err != nil {
+		return nil, err
 	}
-)
+	defer diskDB.Close()
 
-func initColumns(db *sql.DB, tables []string) error {
+	memDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+
 	for _, table := range tables {
-		rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-		if err != nil {
-			return err
+		sqlStmt := fmt.Sprintf(
+			"ATTACH DATABASE '%s' AS disk; CREATE TABLE %s AS SELECT * FROM disk.%s;",
+			filename, table, table,
+		)
+		if _, err := memDB.Exec(sqlStmt); err != nil {
+			return nil, err
 		}
-		defer rows.Close()
+	}
 
-		var cols []string
+	for _, table := range tables {
+		rows, err := memDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+		if err != nil {
+			return nil, err
+		}
+
+		cols := make([]string, 0)
+		columnSet := make(map[string]struct{})
+
 		for rows.Next() {
 			var cid int
 			var name, ctype string
@@ -57,146 +67,134 @@ func initColumns(db *sql.DB, tables []string) error {
 				continue
 			}
 			cols = append(cols, name)
+			columnSet[name] = struct{}{}
 		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
 		tableColumns[table] = cols
+		tableColumnSets[table] = columnSet
 	}
-	return nil
+
+	return memDB, nil
 }
 
 func handleQuery(db *sql.DB, table string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		cols, ok := tableColumns[table]
-		if !ok {
+		table = cleanRe.ReplaceAllString(table, "")
+		columnSet, tableExists := tableColumnSets[table]
+		if !tableExists {
 			http.Error(w, `{"error":"unknown table"}`, http.StatusBadRequest)
 			return
 		}
-		colMap := make(map[string]struct{}, len(cols))
-		for _, c := range cols {
-			colMap[c] = struct{}{}
-		}
 
-		params := r.URL.Query()
-		fuzzyEnabled := false
-		if vals, ok := params["match"]; ok && len(vals) > 0 && vals[0] == "fuzzy" {
-			fuzzyEnabled = true
-			delete(params, "match")
-		}
+		queryParams := request.URL.Query()
+		enableFuzzyMatching := queryParams.Get("match") == "fuzzy"
+		queryParams.Del("match")
 
-		idPart := strings.TrimPrefix(r.URL.Path, "/"+table+"/")
-		if idPart != "" {
-			clean := cleanRe.ReplaceAllString(idPart, "")
-			if clean != "" {
-				params["id"] = []string{clean}
+		if idPart := strings.TrimPrefix(request.URL.Path, "/"+table+"/"); idPart != "" {
+			if cleanID := cleanRe.ReplaceAllString(idPart, ""); cleanID != "" {
+				queryParams.Set("id", cleanID)
 			}
 		}
 
-		rows, err := db.Query("SELECT * FROM " + table)
+		var rows *sql.Rows
+		var err error
+
+		// Optimize for ID lookups
+		if ids, ok := queryParams["id"]; ok && len(ids) == 1 && !enableFuzzyMatching {
+			rows, err = db.Query("SELECT * FROM "+table+" WHERE id = ?", ids[0])
+		} else {
+			rows, err = db.Query("SELECT * FROM " + table)
+		}
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		colNames, _ := rows.Columns()
-		type scoredRow struct {
-			score int
-			id    int
-			row   map[string]any
-		}
-		var best *scoredRow
+		columnNames, _ := rows.Columns()
+		var results []map[string]any
 
 		for rows.Next() {
-			values := make([]any, len(colNames))
-			ptrs := make([]any, len(colNames))
+			values := make([]any, len(columnNames))
 			for i := range values {
-				ptrs[i] = &values[i]
+				values[i] = new(any)
 			}
-			if err := rows.Scan(ptrs...); err != nil {
+			if err := rows.Scan(values...); err != nil {
 				continue
 			}
 
-			rowMap := map[string]any{}
-			for i, col := range colNames {
-				rowMap[col] = values[i]
+			row := make(map[string]any, len(columnNames))
+			for i, name := range columnNames {
+				val := *(values[i].(*any))
+				if b, ok := val.([]byte); ok {
+					row[name] = string(b)
+				} else {
+					row[name] = val
+				}
 			}
 
-			match := true
-			score := 0
-			for key, val := range params {
-				if _, ok := colMap[key]; !ok {
+			matched := true
+			for key, vals := range queryParams {
+				if _, ok := columnSet[key]; !ok {
 					http.Error(w, fmt.Sprintf(`{"error":"unknown column '%s'"}`, key), http.StatusBadRequest)
 					return
 				}
-				strVal := fmt.Sprintf("%v", rowMap[key])
-				queryVal := val[0]
 
-				if fuzzyEnabled {
-					partial := strings.Contains(strings.ToLower(strVal), strings.ToLower(queryVal))
-					fuzzyScore := fuzzy.RankMatch(queryVal, strVal)
+				colVal := strings.ToLower(fmt.Sprint(row[key]))
+				queryVal := strings.ToLower(cleanRe.ReplaceAllString(vals[0], ""))
 
-					if partial {
-						score += len(queryVal)
-					} else if fuzzyScore >= FuzzyScore {
-						score += fuzzyScore
-					} else {
-						match = false
+				if enableFuzzyMatching {
+					if !strings.Contains(colVal, queryVal) && fuzzy.RankMatch(queryVal, colVal) < FuzzyScore {
+						matched = false
 						break
 					}
-				} else if strVal != queryVal {
-					match = false
+				} else if colVal != queryVal {
+					matched = false
 					break
 				}
 			}
 
-			if match {
-				id := 0
-				if v, ok := rowMap["id"].(int); ok {
-					id = v
-				} else if v, ok := rowMap["id"].(int64); ok {
-					id = int(v)
-				}
-				sr := scoredRow{score: score, id: id, row: rowMap}
-				if best == nil || sr.score > best.score || (sr.score == best.score && sr.id < best.id) {
-					best = &sr
-				}
+			if matched {
+				id := fmt.Sprint(row["id"])
+				row["image"] = fmt.Sprintf("Data/%s/%s.png", table, id)
+				results = append(results, row)
 			}
 		}
 
-		results := []map[string]any{}
-		if best != nil {
-			results = append(results, best.row)
-		}
-
-		pluralTable := table
-		if !strings.HasSuffix(pluralTable, "s") {
-			pluralTable += "s"
-		}
-
-		json.NewEncoder(w).Encode(map[string]any{pluralTable: results})
+		json.NewEncoder(w).Encode(map[string]any{table: results})
 	}
+}
+
+func StartServer(dbFile string, addr string) error {
+	db, err := initDB(dbFile, tables)
+	if err != nil {
+		return fmt.Errorf("failed to initialize DB and columns: %w", err)
+	}
+	defer db.Close()
+
+	for _, table := range tables {
+		http.HandleFunc("/"+table, handleQuery(db, table))
+		http.HandleFunc("/"+table+"/", handleQuery(db, table))
+	}
+
+	log.Printf("Server running on %s", addr)
+	return http.ListenAndServe(addr, nil)
 }
 
 func main() {
-	tables := []string{"items", "spells", "units", "sites", "mercs"}
-	db := DBcheck("dom6api.db", "create_tables.sql")
-	defer db.Close()
-
-	if err := initColumns(db, tables); err != nil {
-		log.Fatalf("failed to initialize table columns: %s", err)
+	if err := StartServer("dom6api.db", ":8080"); err != nil {
+		log.Fatal(err)
 	}
-
-	for _, table := range tables {
-		http.HandleFunc("/"+table+"/", handleQuery(db, table))
-	}
-	log.Println("Server running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-//------------------- Data base -----------------
-
-func DBcheck(filename string, sqlFile string) *sql.DB {
+// --- Scrape ---
+func dbcheck(filename string, sqlFile string) *sql.DB {
 	db, err := sql.Open("sqlite", filename)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
@@ -217,37 +215,3 @@ func DBcheck(filename string, sqlFile string) *sql.DB {
 
 	return db
 }
-
-// ------------------------- Helpers ----------------------------------------
-
-// TODO re-add all the edgecases from the previous app
-// TODO add mount edgcases. Mount, co-rider
-// TODO add glamour
-// TODO trim
-// TODO figure out what this function was for
-
-/*
-Got it — you want the Go server to support both:
-
-✅ /items/{id} style routes (fetch by ID)
-✅ /items?name=...&match=fuzzy style routes (query by name, with optional fuzzy matching and filters like size for units)
-
-Before proceeding — confirm:
-
-You already have a shared handler like handleQuery(table string) that dispatches to DB reads.
-
-You want to keep that structure but extend it to handle these PHP-style query parameters.
-
-Fuzzy match should mean LIKE '%name%' (SQL equivalent), correct?
-
-Once confirmed, I'll rewrite your Go handler layer to cover the same query behavior as the PHP routes.
-*/
-
-/*
-TODO
-Make the query handler match the old one and add mounts into the mix.
-general clean up and efficiency over the older model.
-Make an in memory sqlite instance to resolve the potentially horrendous speed issues.
-Make sure output format is unified.
-attached PNG to ID.
-*/
