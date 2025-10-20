@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -14,7 +15,22 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const DBFile = "Data/dom6api.db"
+const (
+	DBFile = "Data/dom6api.db"
+
+	ItemTable  = "items"
+	MercTable  = "mercs"
+	SpellTable = "spells"
+	UnitTable  = "units"
+	SiteTable  = "sites"
+
+	fuzzyScoreThreshold   = 70
+	fuzzyPartialThreshold = 85
+)
+
+var (
+	cleanRe = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
+)
 
 type (
 	Entity struct {
@@ -74,6 +90,7 @@ Make an in memory sqlite instance to resolve the potentially horrendous speed is
 Make sure output format is unified.
 attached PNG to ID.
 */
+
 func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		part := strings.TrimPrefix(r.URL.Path, "/"+table+"/")
@@ -82,18 +99,27 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 			return
 		}
 
+		clean := cleanRe.ReplaceAllString(part, "")
+		if clean == "" {
+			http.Error(w, "Invalid query format", http.StatusBadRequest)
+			return
+		}
+
 		var entities []any
-		if id, err := strconv.Atoi(part); err == nil {
+		if id, err := strconv.Atoi(clean); err == nil {
 			if e, err := fromID(db, table, id); err == nil {
 				entities = append(entities, e)
 			}
-		} else if isAlphabetical(part) {
-			if ents, err := FromName(db, table, part); err == nil {
-				entities = append(entities, ents...)
-			}
 		} else {
-			http.Error(w, "Invalid query format", http.StatusBadRequest)
-			return
+			upperClean := strings.ToUpper(clean)
+			ids, err := getIDsByName(db, table, upperClean)
+			if err == nil && len(ids) > 0 {
+				for _, id := range ids {
+					if e, err := fromID(db, table, id); err == nil {
+						entities = append(entities, e)
+					}
+				}
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -101,78 +127,55 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 	}
 }
 
-// --- Fuzzy search by name ---
-func FromName(db *sql.DB, table, name string) ([]any, error) {
-	//TODO make this less crude.
-	nameUpper := strings.ToUpper(name)
-	var results []any
-
+// --- ID lookup ---
+func fromID(db *sql.DB, table string, id int) (any, error) {
 	switch table {
-	case "items":
-		ids, err := getIDsByName(db, "items", nameUpper)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			if e, err := getItem(db, id); err == nil {
-				results = append(results, e)
-			}
-		}
 
-	case "mercs":
-		ids, err := getIDsByName(db, "mercs", nameUpper)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			if e, err := getMerc(db, id); err == nil {
-				results = append(results, e)
-			}
-		}
+	case ItemTable:
+		items, err := getItems(db, []int{id})
+		ensureResult(items, err, "item not found")
+		return items[0], nil
 
-	case "spells":
-		ids, err := getIDsByName(db, "spells", nameUpper)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			if e, err := getSpell(db, id); err == nil {
-				results = append(results, e)
-			}
-		}
+	case MercTable:
+		mercs, err := getMercs(db, []int{id})
+		ensureResult(mercs, err, "merc not found")
+		return mercs[0], nil
 
-	case "units":
-		ids, err := getIDsByName(db, "units", nameUpper)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			if e, err := getUnit(db, id); err == nil {
-				results = append(results, e)
-			}
-		}
+	case SpellTable:
+		spells, err := getSpells(db, []int{id})
+		ensureResult(spells, err, "spell not found")
+		return spells[0], nil
 
-	case "sites":
-		ids, err := getIDsByName(db, "sites", nameUpper)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			if e, err := getSite(db, id); err == nil {
-				results = append(results, e)
-			}
-		}
+	case UnitTable:
+		units, err := getUnits(db, []int{id})
+		ensureResult(units, err, "unit not found")
+		return units[0], nil
+
+	case SiteTable:
+		sites, err := getSites(db, []int{id})
+		ensureResult(sites, err, "site not found")
+		return sites[0], nil
 
 	default:
 		return nil, fmt.Errorf("unknown table: %s", table)
 	}
-
-	return results, nil
 }
+
+// --- error helper condenser ---
+func ensureResult[T any](objs []*T, err error, notFoundMsg string) ([]*T, error) {
+	if err != nil {
+		return nil, err
+	}
+	if len(objs) == 0 {
+		return nil, fmt.Errorf("%s", notFoundMsg)
+	}
+	return objs, nil
+}
+
+// --- Sub-functions ---
 
 // --- Helper to find IDs by fuzzy name ---
 func getIDsByName(db *sql.DB, table, nameUpper string) ([]int, error) {
-	//TODO make sure that this is working properly
 	rows, err := db.Query("SELECT id, name FROM " + table)
 	if err != nil {
 		return nil, err
@@ -187,123 +190,98 @@ func getIDsByName(db *sql.DB, table, nameUpper string) ([]int, error) {
 			continue
 		}
 		rowUpper := strings.ToUpper(rowName)
-		score := fuzzy.Ratio(nameUpper, rowUpper)
-		partial := fuzzy.PartialRatio(nameUpper, rowUpper)
-		if score >= 70 || partial >= 85 {
+		if fuzzy.Ratio(nameUpper, rowUpper) >= fuzzyScoreThreshold ||
+			fuzzy.PartialRatio(nameUpper, rowUpper) >= fuzzyPartialThreshold {
 			ids = append(ids, id)
 		}
 	}
 	return ids, nil
 }
 
-// --- ID lookup ---
-func fromID(db *sql.DB, table string, id int) (any, error) {
-	switch table {
-	case "items":
-		return getItem(db, id)
-	case "mercs":
-		return getMerc(db, id)
-	case "spells":
-		return getSpell(db, id)
-	case "units":
-		return getUnit(db, id)
-	case "sites":
-		return getSite(db, id)
-	default:
-		return nil, fmt.Errorf("unknown table: %s", table)
+func fetchByIDs[T any](db *sql.DB, table string, ids []int, scanRow func(*sql.Rows) (T, error)) ([]*T, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no ids provided")
 	}
-}
 
-// --- Sub-functions ---
+	query := fmt.Sprintf("SELECT * FROM %s WHERE id IN (%s)", table, strings.TrimRight(strings.Repeat("?,", len(ids)), ","))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
 
-func getItem(db *sql.DB, id int) (*Item, error) {
-	var i Item
-	err := db.QueryRow(`
-		SELECT id, name, type, constlevel, mainlevel, mpath, gemcost
-		FROM items WHERE id=?`, id).Scan(
-		&i.ID, &i.Name, &i.Type, &i.ConstLevel, &i.MainLevel, &i.MPath, &i.GemCost,
-	)
+	rows, err := db.Query(query, args...)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("item not found")
-		}
 		return nil, err
 	}
-	i.Table = "items"
-	i.Screenshot = fmt.Sprintf("/data/Item/%d.png", i.ID)
-	return &i, nil
-}
+	defer rows.Close()
 
-func getMerc(db *sql.DB, id int) (*Merc, error) {
-	var m Merc
-	err := db.QueryRow(`
-		SELECT id, name, bossname, commander_id, unit_id, nrunits
-		FROM mercs WHERE id=?`, id).Scan(
-		&m.ID, &m.Name, &m.BossName, &m.CommanderID, &m.UnitID, &m.NRUnits,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("merc not found")
+	var result []*T
+	for rows.Next() {
+		if obj, err := scanRow(rows); err == nil {
+			result = append(result, &obj)
 		}
+	}
+
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	m.Table = "mercs"
-	m.Screenshot = fmt.Sprintf("/data/Merc/%d.png", m.ID)
-	return &m, nil
+
+	return result, nil
 }
 
-func getSpell(db *sql.DB, id int) (*Spell, error) {
-	var s Spell
-	err := db.QueryRow(`
-		SELECT id, name, gemcost, mpath, type, school, researchlevel
-		FROM spells WHERE id=?`, id).Scan(
-		&s.ID, &s.Name, &s.GemCost, &s.MPath, &s.Type, &s.School, &s.ResearchLevel,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("spell not found")
-		}
-		return nil, err
-	}
-	s.Table = "spells"
-	s.Screenshot = fmt.Sprintf("/data/Spell/%d.png", s.ID)
-	return &s, nil
+// --- Condensed get functions ---
+func getItems(db *sql.DB, ids []int) ([]*Item, error) {
+	return fetchByIDs(db, ItemTable, ids, func(r *sql.Rows) (Item, error) {
+		var i Item
+		err := r.Scan(&i.ID, &i.Name, &i.Type, &i.ConstLevel, &i.MainLevel, &i.MPath, &i.GemCost)
+		i.Table = ItemTable
+		i.Screenshot = fmt.Sprintf("/data/Item/%d.png", i.ID)
+		return i, err
+	})
 }
 
-func getUnit(db *sql.DB, id int) (*Unit, error) {
-	var u Unit
-	err := db.QueryRow(`
-		SELECT id, name, hp, size
-		FROM units WHERE id=?`, id).Scan(&u.ID, &u.Name, &u.HP, &u.Size)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("unit not found")
-		}
-		return nil, err
-	}
-	u.Table = "units"
-	u.Screenshot = fmt.Sprintf("/data/Unit/%d.png", u.ID)
-	return &u, nil
+func getMercs(db *sql.DB, ids []int) ([]*Merc, error) {
+	return fetchByIDs(db, MercTable, ids, func(r *sql.Rows) (Merc, error) {
+		var m Merc
+		err := r.Scan(&m.ID, &m.Name, &m.BossName, &m.CommanderID, &m.UnitID, &m.NRUnits)
+		m.Table = MercTable
+		m.Screenshot = fmt.Sprintf("/data/Merc/%d.png", m.ID)
+		return m, err
+	})
 }
 
-func getSite(db *sql.DB, id int) (*Site, error) {
-	var s Site
-	err := db.QueryRow(`
-		SELECT id, name, path, level, rarity
-		FROM sites WHERE id=?`, id).Scan(&s.ID, &s.Name, &s.Path, &s.Level, &s.Rarity)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("site not found")
-		}
-		return nil, err
-	}
-	s.Table = "sites"
-	s.Screenshot = fmt.Sprintf("/data/Site/%d.png", s.ID)
-	return &s, nil
+func getSpells(db *sql.DB, ids []int) ([]*Spell, error) {
+	return fetchByIDs(db, SpellTable, ids, func(r *sql.Rows) (Spell, error) {
+		var s Spell
+		err := r.Scan(&s.ID, &s.Name, &s.GemCost, &s.MPath, &s.Type, &s.School, &s.ResearchLevel)
+		s.Table = SpellTable
+		s.Screenshot = fmt.Sprintf("/data/Spell/%d.png", s.ID)
+		return s, err
+	})
+}
+
+func getUnits(db *sql.DB, ids []int) ([]*Unit, error) {
+	return fetchByIDs(db, UnitTable, ids, func(r *sql.Rows) (Unit, error) {
+		var u Unit
+		err := r.Scan(&u.ID, &u.Name, &u.HP, &u.Size)
+		u.Table = UnitTable
+		u.Screenshot = fmt.Sprintf("/data/Unit/%d.png", u.ID)
+		return u, err
+	})
+}
+
+func getSites(db *sql.DB, ids []int) ([]*Site, error) {
+	return fetchByIDs(db, SiteTable, ids, func(r *sql.Rows) (Site, error) {
+		var s Site
+		err := r.Scan(&s.ID, &s.Name, &s.Path, &s.Level, &s.Rarity)
+		s.Table = SiteTable
+		s.Screenshot = fmt.Sprintf("/data/Site/%d.png", s.ID)
+		return s, err
+	})
 }
 
 func main() {
-	tables := []string{"item", "spell", "unit", "site", "merc", "event"}
+	tables := []string{"item", "spell", "unit", "site", "merc"}
 	db := DBcheck("dom6api.db", "create_tables.sql")
 	defer db.Close()
 
@@ -340,47 +318,25 @@ func DBcheck(filename string, sqlFile string) *sql.DB {
 
 // ------------------------- Helpers ----------------------------------------
 
-func isAlphabetical(s string) bool {
-	for _, r := range s {
-		if r < 'A' || r > 'Z' {
-			return false
-		}
-	}
-	return true
-}
-
 // TODO re-add all the edgecases from the previous app
 // TODO add mount edgcases. Mount, co-rider
 // TODO add glamour
 // TODO trim
 // TODO figure out what this function was for
-func NewUnit(props map[string][]string) *Unit {
-	if paths, ok := props["randompaths"]; ok {
-		decoded := make([]string, len(paths))
-		copy(decoded, paths)
-		props["randompaths"] = decoded
-	}
-	return &Unit{Props: props}
-}
 
-// TODO figure out what this function was for
-func NewSite(props map[string]string) *Site {
-	excluded := map[string]struct{}{
-		"F":   {},
-		"A":   {},
-		"W":   {},
-		"E":   {},
-		"S":   {},
-		"D":   {},
-		"N":   {},
-		"B":   {},
-		"loc": {},
-	}
-	cleanProps := make(map[string]string)
-	for k, v := range props {
-		if _, ok := excluded[k]; !ok {
-			cleanProps[k] = v
-		}
-	}
-	return &Site{Props: cleanProps}
-}
+/*
+Got it — you want the Go server to support both:
+
+✅ /items/{id} style routes (fetch by ID)
+✅ /items?name=...&match=fuzzy style routes (query by name, with optional fuzzy matching and filters like size for units)
+
+Before proceeding — confirm:
+
+You already have a shared handler like handleQuery(table string) that dispatches to DB reads.
+
+You want to keep that structure but extend it to handle these PHP-style query parameters.
+
+Fuzzy match should mean LIKE '%name%' (SQL equivalent), correct?
+
+Once confirmed, I’ll rewrite your Go handler layer to cover the same query behavior as the PHP routes.
+*/
