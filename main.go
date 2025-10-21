@@ -2,205 +2,28 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"regexp"
-	"strings"
-
-	"github.com/lithammer/fuzzysearch/fuzzy"
-
-	_ "modernc.org/sqlite"
+	"os/exec"
 )
 
 const (
-	DBFile     = "Data/dom6api.db"
-	FuzzyScore = 70
+	DBFile        = "Data/dom6api.db"
+	SqlFile       = "create_tables.sql"
+	InspectorPort = 8001
+	APIPort       = 8002
 )
 
-var (
-	tables          = []string{"items", "spells", "units", "sites", "mercs"}
-	cleanRe         = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
-	tableColumns    = map[string][]string{}
-	tableColumnSets = make(map[string]map[string]struct{})
-)
-
-// ------------------- API -----------------
-func initDB(filename string, tables []string) (*sql.DB, error) {
-	diskDB, err := sql.Open("sqlite", filename)
-	if err != nil {
-		return nil, err
-	}
-	defer diskDB.Close()
-
-	memDB, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		return nil, err
-	}
-
-	for _, table := range tables {
-		sqlStmt := fmt.Sprintf(
-			"ATTACH DATABASE '%s' AS disk; CREATE TABLE %s AS SELECT * FROM disk.%s;",
-			filename, table, table,
-		)
-		if _, err := memDB.Exec(sqlStmt); err != nil {
-			return nil, err
-		}
-	}
-
-	for _, table := range tables {
-		rows, err := memDB.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-		if err != nil {
-			return nil, err
-		}
-
-		cols := make([]string, 0)
-		columnSet := make(map[string]struct{})
-
-		for rows.Next() {
-			var cid int
-			var name, ctype string
-			var notnull, dflt_value, pk any
-			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt_value, &pk); err != nil {
-				continue
-			}
-			cols = append(cols, name)
-			columnSet[name] = struct{}{}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-
-		tableColumns[table] = cols
-		tableColumnSets[table] = columnSet
-	}
-
-	return memDB, nil
-}
-
-func handleQuery(db *sql.DB, table string) http.HandlerFunc {
-	return func(w http.ResponseWriter, request *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		table = cleanRe.ReplaceAllString(table, "")
-		columnSet, tableExists := tableColumnSets[table]
-		if !tableExists {
-			http.Error(w, `{"error":"unknown table"}`, http.StatusBadRequest)
-			return
-		}
-
-		queryParams := request.URL.Query()
-		enableFuzzyMatching := queryParams.Get("match") == "fuzzy"
-		queryParams.Del("match")
-
-		if idPart := strings.TrimPrefix(request.URL.Path, "/"+table+"/"); idPart != "" {
-			if cleanID := cleanRe.ReplaceAllString(idPart, ""); cleanID != "" {
-				queryParams.Set("id", cleanID)
-			}
-		}
-
-		var rows *sql.Rows
-		var err error
-
-		// Optimize for ID lookups
-		if ids, ok := queryParams["id"]; ok && len(ids) == 1 && !enableFuzzyMatching {
-			rows, err = db.Query("SELECT * FROM "+table+" WHERE id = ?", ids[0])
-		} else {
-			rows, err = db.Query("SELECT * FROM " + table)
-		}
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		columnNames, _ := rows.Columns()
-		var results []map[string]any
-
-		for rows.Next() {
-			values := make([]any, len(columnNames))
-			for i := range values {
-				values[i] = new(any)
-			}
-			if err := rows.Scan(values...); err != nil {
-				continue
-			}
-
-			row := make(map[string]any, len(columnNames))
-			for i, name := range columnNames {
-				val := *(values[i].(*any))
-				if b, ok := val.([]byte); ok {
-					row[name] = string(b)
-				} else {
-					row[name] = val
-				}
-			}
-
-			matched := true
-			for key, vals := range queryParams {
-				if _, ok := columnSet[key]; !ok {
-					http.Error(w, fmt.Sprintf(`{"error":"unknown column '%s'"}`, key), http.StatusBadRequest)
-					return
-				}
-
-				colVal := strings.ToLower(fmt.Sprint(row[key]))
-				queryVal := strings.ToLower(cleanRe.ReplaceAllString(vals[0], ""))
-
-				if enableFuzzyMatching {
-					if !strings.Contains(colVal, queryVal) && fuzzy.RankMatch(queryVal, colVal) < FuzzyScore {
-						matched = false
-						break
-					}
-				} else if colVal != queryVal {
-					matched = false
-					break
-				}
-			}
-
-			if matched {
-				id := fmt.Sprint(row["id"])
-				row["image"] = fmt.Sprintf("Data/%s/%s.png", table, id)
-				results = append(results, row)
-			}
-		}
-
-		json.NewEncoder(w).Encode(map[string]any{table: results})
-	}
-}
-
-func StartServer(dbFile string, addr string) error {
-	db, err := initDB(dbFile, tables)
-	if err != nil {
-		return fmt.Errorf("failed to initialize DB and columns: %w", err)
-	}
-	defer db.Close()
-
-	for _, table := range tables {
-		http.HandleFunc("/"+table, handleQuery(db, table))
-		http.HandleFunc("/"+table+"/", handleQuery(db, table))
-	}
-
-	log.Printf("Server running on %s", addr)
-	return http.ListenAndServe(addr, nil)
-}
-
-func main() {
-	if err := StartServer("dom6api.db", ":8080"); err != nil {
-		log.Fatal(err)
-	}
-}
-
-// --- Scrape ---
 func dbcheck(filename string, sqlFile string) *sql.DB {
+	log.Println("Checking database:", filename)
 	db, err := sql.Open("sqlite", filename)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		log.Println("Database not found. Creating from SQL schema...")
 		sqlBytes, err := os.ReadFile(sqlFile)
 		if err != nil {
 			log.Fatalf("Failed to read SQL file: %v", err)
@@ -211,7 +34,56 @@ func dbcheck(filename string, sqlFile string) *sql.DB {
 		if err != nil {
 			log.Fatalf("Failed to execute SQL file: %v", err)
 		}
+		log.Println("Database created successfully.")
+	} else {
+		log.Println("Database exists. Skipping creation.")
 	}
 
 	return db
+}
+
+func main() {
+	db := dbcheck(DBFile, SqlFile)
+	defer db.Close()
+
+	// Start Go HTTP server in background
+	go func() {
+		log.Printf("Starting Go server on port %d...", APIPort)
+		err := StartServer(DBFile, fmt.Sprintf(":%d", APIPort))
+
+		if err != nil {
+			log.Fatal("Go server failed:", err)
+		}
+	}()
+	log.Println("Go server launch initiated.")
+
+	// Ensure GitHub folder exists
+	folder := "dom6inspector"
+	repoURL := "https://github.com/larzm42/dom6inspector"
+	if _, err := os.Stat(folder); os.IsNotExist(err) {
+		log.Println("Folder not found. Cloning repo...")
+		cmd := exec.Command("git", "clone", repoURL, folder)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Fatal("Failed to clone repo:", err)
+		}
+		log.Println("Repo cloned successfully.")
+	} else {
+		log.Println("Folder exists. Skipping clone.")
+	}
+
+	// Start Python server in background
+	log.Printf("Starting Python server on port %d...\n", InspectorPort)
+
+	pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
+	pyCmd.Dir = folder
+	pyCmd.Stdout = os.Stdout
+	pyCmd.Stderr = os.Stderr
+	if err := pyCmd.Start(); err != nil {
+		log.Fatal("Failed to start Python server:", err)
+	}
+	log.Printf("Python server started in background on port 8001 (PID %d)\n", pyCmd.Process.Pid)
+
+	select {} // keep main alive
 }
