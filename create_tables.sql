@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS units (
 	hp    INT  NOT NULL,
 	size  INT  NOT NULL CHECK(size >= 1 AND size <= 10),
     mount INT,
-	corider INT
+	co_rider INT
 );
 
 CREATE TABLE IF NOT EXISTS unit_props (
