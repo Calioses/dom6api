@@ -182,7 +182,7 @@ func StartServer(dbFile string, addr string) error {
 		http.HandleFunc("/"+table+"/", handleQuery(db, table))
 	}
 
-	log.Printf("Server running on %s", addr)
+	// log.Printf("Server running on %s", addr)
 	return http.ListenAndServe(addr, nil)
 }
 

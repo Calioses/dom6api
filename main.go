@@ -48,7 +48,7 @@ func main() {
 
 	// Start Go HTTP server in background
 	go func() {
-		log.Printf("Starting Go server on port %d...", APIPort)
+		log.Printf("Starting Go server on http://localhost:%d ...", APIPort)
 		err := StartServer(DBFile, fmt.Sprintf(":%d", APIPort))
 
 		if err != nil {
@@ -74,7 +74,7 @@ func main() {
 	}
 
 	// Start Python server in background
-	log.Printf("Starting Python server on port %d...\n", InspectorPort)
+	// log.Printf("Starting Python server on port %d...\n", InspectorPort)
 
 	pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
 	pyCmd.Dir = folder
@@ -83,7 +83,6 @@ func main() {
 	if err := pyCmd.Start(); err != nil {
 		log.Fatal("Failed to start Python server:", err)
 	}
-	log.Printf("Python server started in background on port 8001 (PID %d)\n", pyCmd.Process.Pid)
-
+	log.Printf("Python server started in background at http://localhost:%d (PID %d)", InspectorPort, pyCmd.Process.Pid)
 	select {} // keep main alive
 }
