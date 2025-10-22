@@ -63,15 +63,11 @@ func main() {
 	log.Println("Go server launch initiated.")
 
 	folder := "dom6inspector"
-	repoURL := "https://github.com/larzm42/dom6inspector"
 	if _, err := os.Stat(folder); os.IsNotExist(err) {
 		log.Println("Folder not found. Cloning repo...")
-		if err := exec.Command("git", "clone", repoURL, folder).Run(); err != nil {
+		if err := exec.Command("git", "clone", "https://github.com/larzm42/dom6inspector", folder).Run(); err != nil {
 			log.Fatal("Failed to clone repo:", err)
 		}
-		log.Println("Repo cloned successfully.")
-	} else {
-		log.Println("Folder exists. Skipping clone.")
 	}
 
 	pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
@@ -85,5 +81,20 @@ func main() {
 
 	time.Sleep(10 * time.Second)
 	scrape()
-	select {}
+
+	if err := pyCmd.Process.Kill(); err != nil {
+		log.Printf("Failed to stop Python server: %v", err)
+	} else {
+		log.Println("Python server stopped")
+	}
+
+	// restart Go server directly
+	go func() {
+		log.Printf("Restarting Go server on http://localhost:%d ...", APIPort)
+		if err := StartServer(DBFile, fmt.Sprintf(":%d", APIPort)); err != nil {
+			log.Fatal("Go server failed:", err)
+		}
+	}()
+
+	select {} // keep main alive
 }
