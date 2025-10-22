@@ -1,9 +1,13 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/playwright-community/playwright-go"
@@ -14,6 +18,14 @@ const (
 	SqlFile       = "create_tables.sql"
 	InspectorPort = 8001
 	APIPort       = 8002
+)
+
+var (
+	schools        = []string{"Conjuration", "Alteration", "Evocation", "Construction", "Enchantment", "Thaumaturgy", "Blood", "Divine"}
+	rarities       = map[int]string{0: "Common", 1: "Uncommon", 2: "Rare", 5: "Never random", 11: "Throne lvl1", 12: "Throne lvl2", 13: "Throne lvl3"}
+	jsonArrayProps = []string{"randompaths"}
+	unitExcluded   = map[string]struct{}{"id": {}, "fullname": {}, "hp": {}, "size": {}, "mount": {}, "co_rider": {}}
+	siteExcluded   = map[string]struct{}{"id": {}, "name": {}, "path": {}, "level": {}, "rarity": {}}
 )
 
 func main() {
@@ -48,7 +60,7 @@ func main() {
 		log.Fatalf("could not goto url %s: %v", url, err)
 	}
 
-	types := []string{"item", "spell", "unit", "site", "merc", "event"}
+	var types = []string{"item", "spell", "unit", "site", "merc", "event"}
 
 	for _, t := range types {
 		log.Printf("Clicking tab for %s...", t)
@@ -135,10 +147,122 @@ func main() {
 
 			log.Printf("Screenshot saved for %s id %s", t, entityID)
 
-			// small delay to avoid rate limiting
-			// time.Sleep(150 * time.Millisecond)
+			populate(page, "Data/dom6api.db", t, i)
+
 		}
 	}
 
 	log.Println("Done. Closing browser...")
+}
+
+func populateProps(stmt *sql.Stmt, id interface{}, entity map[string]interface{}, excluded map[string]struct{}) {
+	for prop, val := range entity {
+		if _, skip := excluded[prop]; skip {
+			continue
+		}
+		switch v := val.(type) {
+		case []interface{}:
+			for i, elem := range v {
+				outVal := fmt.Sprintf("%v", elem)
+				if slices.Contains(jsonArrayProps, prop) {
+					b, _ := json.Marshal(elem)
+					outVal = string(b)
+				}
+				stmt.Exec(id, prop, outVal, i)
+			}
+		default:
+			stmt.Exec(id, prop, fmt.Sprintf("%v", v), nil)
+		}
+	}
+}
+
+func populate(page playwright.Page, dbFile string, category string, entityIndex int) {
+
+	db, err := sql.Open("sqlite3", dbFile)
+	if err != nil {
+		log.Fatalf("could not open db: %v", err)
+	}
+	defer db.Close()
+
+	result, err := page.Evaluate(fmt.Sprintf("() => DMI.modctx['%sdata'][%d]", category, entityIndex))
+	if err != nil {
+		log.Printf("could not fetch entity %d for %s: %v", entityIndex, category, err)
+		return
+	}
+
+	entityMap, ok := result.(map[string]interface{})
+	if !ok {
+		log.Printf("unexpected type for entity %d in %s", entityIndex, category)
+		return
+	}
+	entity := entityMap
+
+	switch category {
+	case "spell":
+		if f, ok := entity["school"].(float64); ok && int(f) >= 0 && int(f) < len(schools) {
+			entity["school"] = schools[int(f)]
+		}
+	case "site":
+		if f, ok := entity["rarity"].(float64); ok {
+			if r, exists := rarities[int(f)]; exists {
+				entity["rarity"] = r
+			}
+		}
+	}
+
+	categoryFields := map[string][]string{
+		"item":  {"id", "name", "type", "constlevel", "mainlevel", "mpath", "gemcost"},
+		"spell": {"id", "name", "gemcost", "mpath", "type", "school", "researchlevel"},
+		"unit":  {"id", "fullname", "hp", "size", "mount", "co_rider"},
+		"merc":  {"id", "name", "bossname", "com", "unit", "nrunits"},
+		"site":  {"id", "name", "path", "level", "rarity"},
+		"event": {"id", "name"},
+	}
+
+	fields, ok := categoryFields[category]
+	if !ok {
+		log.Printf("unknown category: %s", category)
+		return
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %ss (%s) VALUES (%s)",
+		category,
+		strings.Join(fields, ", "),
+		strings.Repeat("?, ", len(fields)-1)+"?",
+	)
+	stmt, err := db.Prepare(insertSQL)
+	if err != nil {
+		log.Printf("could not prepare insert for %s: %v", category, err)
+		return
+	}
+	defer stmt.Close()
+
+	values := make([]interface{}, len(fields))
+	for i, f := range fields {
+		values[i] = entity[f]
+	}
+	if _, err := stmt.Exec(values...); err != nil {
+		log.Printf("populate exec error for %s: %v", category, err)
+	}
+
+	if category == "units" || category == "sites" {
+		excluded := unitExcluded
+		if category == "sites" {
+			excluded = siteExcluded
+		}
+
+		stmtPropsSQL := fmt.Sprintf(
+			"INSERT INTO %s_props (%s_id, prop_name, value, arrayprop_ix) VALUES (?, ?, ?, ?)",
+			category, category,
+		)
+		stmtProps, err := db.Prepare(stmtPropsSQL)
+		if err != nil {
+			log.Printf("could not prepare props insert for %s: %v", category, err)
+			return
+		}
+		defer stmtProps.Close()
+
+		populateProps(stmtProps, entity["id"], entity, excluded)
+	}
 }

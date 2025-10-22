@@ -19,7 +19,7 @@ const (
 )
 
 var (
-	tables          = []string{"items", "spells", "units", "sites", "mercs"}
+	tables          = []string{"items", "spells", "units", "sites", "mercs", "events"}
 	cleanRe         = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
 	tableColumns    = map[string][]string{}
 	tableColumnSets = make(map[string]map[string]struct{})

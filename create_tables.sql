@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS site_props (
 	FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS unit_props (
+	unit_id      INT NOT NULL,
+	prop_name    TEXT NOT NULL,
+	value        TEXT NOT NULL,
+	arrayprop_ix INT,
+	PRIMARY KEY (unit_id, prop_name, arrayprop_ix),
+	FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS spells (
 	id            INT  NOT NULL PRIMARY KEY,
 	name          TEXT NOT NULL COLLATE NOCASE,
@@ -52,11 +61,9 @@ CREATE TABLE IF NOT EXISTS units (
 	co_rider INT
 );
 
-CREATE TABLE IF NOT EXISTS unit_props (
-	unit_id      INT NOT NULL,
-	prop_name    TEXT NOT NULL,
-	value        TEXT NOT NULL,
-	arrayprop_ix INT,
-	PRIMARY KEY (unit_id, prop_name, arrayprop_ix),
-	FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
+
+
+CREATE TABLE IF NOT EXISTS events (
+    ID INT NOT NULL PRIMARY KEY,
+    Name TEXT
 );
