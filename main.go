@@ -1,98 +1,89 @@
 package main
 
-// import (
-// 	"database/sql"
-// 	"fmt"
-// 	"log"
-// 	"os"
-// 	"os/exec"
-// )
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
 
-// const (
-// 	DBFile        = "Data/dom6api.db"
-// 	SqlFile       = "create_tables.sql"
-// 	InspectorPort = 8001
-// 	APIPort       = 8002
-// )
-// func EnsureFolders() {
-// 	base := "Data"
-// 	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
+const (
+	DBFile        = "Data/dom6api.db"
+	SqlFile       = "create_tables.sql"
+	InspectorPort = 8001
+	APIPort       = 8002
+)
 
-// 	for _, cat := range categories {
-// 		path := filepath.Join(base, cat)
-// 		if err := os.MkdirAll(path, os.ModePerm); err != nil {
-// 			log.Fatalf("could not create folder %s: %v", path, err)
-// 		}
-// 	}
-// }
-// func dbcheck(filename string, sqlFile string) *sql.DB {
-// 	log.Println("Checking database:", filename)
-// 	db, err := sql.Open("sqlite", filename)
-// 	if err != nil {
-// 		log.Fatalf("Failed to open database: %v", err)
-// 	}
+func dbcheck(filename string, sqlFile string) *sql.DB {
+	log.Println("Opening database:", filename)
+	db, err := sql.Open("sqlite3", filename)
+	if err != nil {
+		log.Fatalf("dbcheck: failed to open database: %v", err)
+	}
 
-// 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-// 		log.Println("Database not found. Creating from SQL schema...")
-// 		sqlBytes, err := os.ReadFile(sqlFile)
-// 		if err != nil {
-// 			log.Fatalf("Failed to read SQL file: %v", err)
-// 		}
+	sqlBytes, err := os.ReadFile(sqlFile)
+	if err != nil {
+		log.Fatalf("dbcheck: failed to read SQL file: %v", err)
+	}
 
-// 		sqlStatements := string(sqlBytes)
-// 		_, err = db.Exec(sqlStatements)
-// 		if err != nil {
-// 			log.Fatalf("Failed to execute SQL file: %v", err)
-// 		}
-// 		log.Println("Database created successfully.")
-// 	} else {
-// 		log.Println("Database exists. Skipping creation.")
-// 	}
+	sqlStatements := string(sqlBytes)
+	if _, err := db.Exec(sqlStatements); err != nil {
+		log.Fatalf("dbcheck: failed to execute SQL file: %v", err)
+	}
 
-// 	return db
-// }
+	log.Println("dbcheck: SQL script executed successfully.")
+	return db
+}
 
-// func main() {
-// 	db := dbcheck(DBFile, SqlFile)
-// 	defer db.Close()
+func EnsureFolders() {
+	base := "Data"
+	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
 
-// 	// Start Go HTTP server in background
-// 	go func() {
-// 		log.Printf("Starting Go server on http://localhost:%d ...", APIPort)
-// 		err := StartServer(DBFile, fmt.Sprintf(":%d", APIPort))
+	for _, cat := range categories {
+		path := filepath.Join(base, cat)
+		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+			log.Fatalf("could not create folder %s: %v", path, err)
+		}
+	}
+}
 
-// 		if err != nil {
-// 			log.Fatal("Go server failed:", err)
-// 		}
-// 	}()
-// 	log.Println("Go server launch initiated.")
+func main() {
+	db := dbcheck(DBFile, SqlFile)
+	defer db.Close()
 
-// 	// Ensure GitHub folder exists
-// 	folder := "dom6inspector"
-// 	repoURL := "https://github.com/larzm42/dom6inspector"
-// 	if _, err := os.Stat(folder); os.IsNotExist(err) {
-// 		log.Println("Folder not found. Cloning repo...")
-// 		cmd := exec.Command("git", "clone", repoURL, folder)
-// 		cmd.Stdout = os.Stdout
-// 		cmd.Stderr = os.Stderr
-// 		if err := cmd.Run(); err != nil {
-// 			log.Fatal("Failed to clone repo:", err)
-// 		}
-// 		log.Println("Repo cloned successfully.")
-// 	} else {
-// 		log.Println("Folder exists. Skipping clone.")
-// 	}
+	go func() {
+		log.Printf("Starting Go server on http://localhost:%d ...", APIPort)
+		if err := StartServer(DBFile, fmt.Sprintf(":%d", APIPort)); err != nil {
+			log.Fatal("Go server failed:", err)
+		}
+	}()
+	log.Println("Go server launch initiated.")
 
-// 	// Start Python server in background
-// 	// log.Printf("Starting Python server on port %d...\n", InspectorPort)
+	folder := "dom6inspector"
+	repoURL := "https://github.com/larzm42/dom6inspector"
+	if _, err := os.Stat(folder); os.IsNotExist(err) {
+		log.Println("Folder not found. Cloning repo...")
+		if err := exec.Command("git", "clone", repoURL, folder).Run(); err != nil {
+			log.Fatal("Failed to clone repo:", err)
+		}
+		log.Println("Repo cloned successfully.")
+	} else {
+		log.Println("Folder exists. Skipping clone.")
+	}
 
-// 	pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
-// 	pyCmd.Dir = folder
-// 	pyCmd.Stdout = os.Stdout
-// 	pyCmd.Stderr = os.Stderr
-// 	if err := pyCmd.Start(); err != nil {
-// 		log.Fatal("Failed to start Python server:", err)
-// 	}
-// 	log.Printf("Python server started in background at http://localhost:%d (PID %d)", InspectorPort, pyCmd.Process.Pid)
-// 	select {} // keep main alive
-// }
+	pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
+	pyCmd.Dir = folder
+	pyCmd.Stdout = os.Stdout
+	pyCmd.Stderr = os.Stderr
+	if err := pyCmd.Start(); err != nil {
+		log.Fatal("Failed to start Python server:", err)
+	}
+	log.Printf("Python server started at http://localhost:%d (PID %d)", InspectorPort, pyCmd.Process.Pid)
+
+	time.Sleep(10 * time.Second)
+	scrape()
+	select {}
+}

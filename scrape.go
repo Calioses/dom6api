@@ -5,20 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/playwright-community/playwright-go"
-)
-
-const (
-	DBFile        = "Data/dom6api.db"
-	SqlFile       = "create_tables.sql"
-	InspectorPort = 8001
-	APIPort       = 8002
 )
 
 var (
@@ -29,28 +21,7 @@ var (
 	siteExcluded   = map[string]struct{}{"id": {}, "name": {}, "path": {}, "level": {}, "rarity": {}}
 )
 
-func dbcheck(filename string, sqlFile string) *sql.DB {
-	log.Println("Opening database:", filename)
-	db, err := sql.Open("sqlite3", filename)
-	if err != nil {
-		log.Fatalf("dbcheck: failed to open database: %v", err)
-	}
-
-	sqlBytes, err := os.ReadFile(sqlFile)
-	if err != nil {
-		log.Fatalf("dbcheck: failed to read SQL file: %v", err)
-	}
-
-	sqlStatements := string(sqlBytes)
-	if _, err := db.Exec(sqlStatements); err != nil {
-		log.Fatalf("dbcheck: failed to execute SQL file: %v", err)
-	}
-
-	log.Println("dbcheck: SQL script executed successfully.")
-	return db
-}
-
-func main() {
+func scrape() {
 	dbcheck(DBFile, SqlFile)
 	log.Println("Starting Playwright...")
 	pw, err := playwright.Run()
