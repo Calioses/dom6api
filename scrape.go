@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -28,11 +29,33 @@ var (
 	siteExcluded   = map[string]struct{}{"id": {}, "name": {}, "path": {}, "level": {}, "rarity": {}}
 )
 
+func dbcheck(filename string, sqlFile string) *sql.DB {
+	log.Println("Opening database:", filename)
+	db, err := sql.Open("sqlite3", filename)
+	if err != nil {
+		log.Fatalf("dbcheck: failed to open database: %v", err)
+	}
+
+	sqlBytes, err := os.ReadFile(sqlFile)
+	if err != nil {
+		log.Fatalf("dbcheck: failed to read SQL file: %v", err)
+	}
+
+	sqlStatements := string(sqlBytes)
+	if _, err := db.Exec(sqlStatements); err != nil {
+		log.Fatalf("dbcheck: failed to execute SQL file: %v", err)
+	}
+
+	log.Println("dbcheck: SQL script executed successfully.")
+	return db
+}
+
 func main() {
+	dbcheck(DBFile, SqlFile)
 	log.Println("Starting Playwright...")
 	pw, err := playwright.Run()
 	if err != nil {
-		log.Fatalf("could not start Playwright: %v", err)
+		log.Fatalf("main: could not start Playwright: %v", err)
 	}
 	defer pw.Stop()
 
@@ -41,14 +64,14 @@ func main() {
 		Headless: playwright.Bool(true),
 	})
 	if err != nil {
-		log.Fatalf("could not launch browser: %v", err)
+		log.Fatalf("main: could not launch browser: %v", err)
 	}
 	defer browser.Close()
 
 	log.Println("Creating new page...")
 	page, err := browser.NewPage()
 	if err != nil {
-		log.Fatalf("could not create page: %v", err)
+		log.Fatalf("main: could not create page: %v", err)
 	}
 	page.SetViewportSize(800, 600)
 
@@ -57,7 +80,7 @@ func main() {
 	if _, err = page.Goto(url, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	}); err != nil {
-		log.Fatalf("could not goto url %s: %v", url, err)
+		log.Fatalf("main: could not goto url %s: %v", url, err)
 	}
 
 	var types = []string{"item", "spell", "unit", "site", "merc", "event"}
@@ -65,19 +88,19 @@ func main() {
 	for _, t := range types {
 		log.Printf("Clicking tab for %s...", t)
 		if _, err := page.Evaluate(fmt.Sprintf(`() => { document.getElementById('%s-page-button').click(); }`, t)); err != nil {
-			log.Fatalf("could not click tab for %s: %v", t, err)
+			log.Fatalf("main: could not click tab for %s: %v", t, err)
 		}
 
 		selector := fmt.Sprintf("#%s-page div.fixed-overlay", t)
 		log.Printf("Waiting for overlay selector: %s", selector)
 		if _, err := page.WaitForSelector(selector); err != nil {
-			log.Fatalf("overlay selector not found for %s: %v", t, err)
+			log.Fatalf("main: overlay selector not found for %s: %v", t, err)
 		}
 
 		exprCount := fmt.Sprintf(`() => DMI.modctx['%sdata'].length`, t)
 		result, err := page.Evaluate(exprCount)
 		if err != nil {
-			log.Fatalf("could not evaluate count for %s: %v", t, err)
+			log.Fatalf("main: could not evaluate count for %s: %v", t, err)
 		}
 
 		var count int
@@ -87,12 +110,17 @@ func main() {
 		case int:
 			count = v
 		default:
-			log.Fatalf("unexpected type for count: %T", v)
+			log.Fatalf("main: unexpected type for count: %T", v)
 		}
 		log.Printf("%d entities found for %s", count, t)
 
 		for i := 0; i < count; i++ {
-			log.Printf("[%s] Rendering entity %d/%d...", t, i+1, count)
+			if t == "spell" {
+				skip, _ := page.Evaluate(fmt.Sprintf(`(i) => DMI.modctx['%sdata'][i].unresearchable || false`, t), i)
+				if skip.(bool) {
+					continue
+				}
+			}
 
 			exprRender := fmt.Sprintf(`(i) => {
 				const e = DMI.modctx['%sdata'][i];
@@ -103,7 +131,7 @@ func main() {
 
 			idAny, err := page.Evaluate(exprRender, i)
 			if err != nil {
-				log.Printf("could not render overlay for %s index %d, skipping: %v", t, i, err)
+				log.Printf("main: could not render overlay for %s index %d, skipping: %v", t, i, err)
 				continue
 			}
 			entityID := fmt.Sprintf("%v", idAny)
@@ -116,43 +144,41 @@ func main() {
 			if _, err := page.WaitForFunction(waitJS, playwright.PageWaitForFunctionOptions{
 				Timeout: playwright.Float(15000),
 			}); err != nil {
-				log.Printf("overlay did not render for %s id %s, skipping: %v", t, entityID, err)
+				log.Printf("main: overlay did not render for %s id %s, skipping: %v", t, entityID, err)
 				continue
 			}
 
 			overlay, err := page.QuerySelector(selector)
 			if err != nil || overlay == nil {
-				log.Printf("overlay element missing for %s id %s, skipping: %v", t, entityID, err)
+				log.Printf("main: overlay element missing for %s id %s, skipping: %v", t, entityID, err)
 				continue
 			}
 
 			path := filepath.Join("Data", t+"s", entityID+".png")
 
-			// Retry screenshot up to 3 times
 			success := false
 			for attempt := 1; attempt <= 3; attempt++ {
 				if _, err := overlay.Screenshot(playwright.ElementHandleScreenshotOptions{
 					Path: playwright.String(path),
 				}); err != nil {
-					log.Printf("Attempt %d: could not screenshot overlay for %s id %s: %v", attempt, t, entityID, err)
+					log.Printf("main: Attempt %d: could not screenshot overlay for %s id %s: %v", attempt, t, entityID, err)
 				} else {
 					success = true
 					break
 				}
 			}
 			if !success {
-				log.Printf("Skipping %s id %s after 3 failed attempts", t, entityID)
+				log.Printf("main: Skipping %s id %s after 3 failed attempts", t, entityID)
 				continue
 			}
 
 			log.Printf("Screenshot saved for %s id %s", t, entityID)
 
 			populate(page, "Data/dom6api.db", t, i)
-
 		}
 	}
 
-	log.Println("Done. Closing browser...")
+	log.Println("main: Done. Closing browser...")
 }
 
 func populateProps(stmt *sql.Stmt, id interface{}, entity map[string]interface{}, excluded map[string]struct{}) {
@@ -168,31 +194,34 @@ func populateProps(stmt *sql.Stmt, id interface{}, entity map[string]interface{}
 					b, _ := json.Marshal(elem)
 					outVal = string(b)
 				}
-				stmt.Exec(id, prop, outVal, i)
+				if _, err := stmt.Exec(id, prop, outVal, i); err != nil {
+					log.Printf("populateProps: could not exec stmt for prop %s: %v", prop, err)
+				}
 			}
 		default:
-			stmt.Exec(id, prop, fmt.Sprintf("%v", v), nil)
+			if _, err := stmt.Exec(id, prop, fmt.Sprintf("%v", v), nil); err != nil {
+				log.Printf("populateProps: could not exec stmt for prop %s: %v", prop, err)
+			}
 		}
 	}
 }
 
 func populate(page playwright.Page, dbFile string, category string, entityIndex int) {
-
 	db, err := sql.Open("sqlite3", dbFile)
 	if err != nil {
-		log.Fatalf("could not open db: %v", err)
+		log.Fatalf("populate: could not open db: %v", err)
 	}
 	defer db.Close()
 
 	result, err := page.Evaluate(fmt.Sprintf("() => DMI.modctx['%sdata'][%d]", category, entityIndex))
 	if err != nil {
-		log.Printf("could not fetch entity %d for %s: %v", entityIndex, category, err)
+		log.Printf("populate: could not fetch entity %d for %s: %v", entityIndex, category, err)
 		return
 	}
 
 	entityMap, ok := result.(map[string]interface{})
 	if !ok {
-		log.Printf("unexpected type for entity %d in %s", entityIndex, category)
+		log.Printf("populate: unexpected type for entity %d in %s", entityIndex, category)
 		return
 	}
 	entity := entityMap
@@ -221,19 +250,20 @@ func populate(page playwright.Page, dbFile string, category string, entityIndex 
 
 	fields, ok := categoryFields[category]
 	if !ok {
-		log.Printf("unknown category: %s", category)
+		log.Printf("populate: unknown category: %s", category)
 		return
 	}
 
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO %ss (%s) VALUES (%s)",
+		"INSERT OR REPLACE INTO %ss (%s) VALUES (%s)",
 		category,
 		strings.Join(fields, ", "),
 		strings.Repeat("?, ", len(fields)-1)+"?",
 	)
+
 	stmt, err := db.Prepare(insertSQL)
 	if err != nil {
-		log.Printf("could not prepare insert for %s: %v", category, err)
+		log.Printf("populate: could not prepare insert for %s: %v", category, err)
 		return
 	}
 	defer stmt.Close()
@@ -243,7 +273,11 @@ func populate(page playwright.Page, dbFile string, category string, entityIndex 
 		values[i] = entity[f]
 	}
 	if _, err := stmt.Exec(values...); err != nil {
-		log.Printf("populate exec error for %s: %v", category, err)
+		if strings.Contains(err.Error(), "CHECK constraint failed") && strings.Contains(err.Error(), "type") {
+			log.Printf("populate: CHECK constraint failed for 'type' on item id %v, value passed: %v", entity["id"], entity["type"])
+		} else {
+			log.Printf("populate: exec error for %s: %v", category, err)
+		}
 	}
 
 	if category == "units" || category == "sites" {
@@ -258,7 +292,7 @@ func populate(page playwright.Page, dbFile string, category string, entityIndex 
 		)
 		stmtProps, err := db.Prepare(stmtPropsSQL)
 		if err != nil {
-			log.Printf("could not prepare props insert for %s: %v", category, err)
+			log.Printf("populate: could not prepare props insert for %s: %v", category, err)
 			return
 		}
 		defer stmtProps.Close()
