@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS unit_props (
 	PRIMARY KEY (unit_id, prop_name, arrayprop_ix),
 	FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS units (
+	id    INT  NOT NULL PRIMARY KEY,
+	name  TEXT NOT NULL COLLATE NOCASE,
+	hp    INT  NOT NULL,
+	size  INT  NOT NULL CHECK(size >= 1 AND size <= 10),
+    mount INT,
+	co_rider INT
+);
 
 CREATE TABLE IF NOT EXISTS spells (
 	id            INT  NOT NULL PRIMARY KEY,
@@ -50,7 +58,7 @@ CREATE TABLE IF NOT EXISTS spells (
 	mpath         TEXT NOT NULL CHECK(LENGTH(mpath) <= 6),
 	type          TEXT NOT NULL CHECK(type IN ('Combat','Ritual')),
 	school        TEXT NOT NULL CHECK(school IN ('Conjuration','Alteration','Evocation','Construction','Enchantment','Thaumaturgy','Blood','Divine')),
-	researchlevel INT  NOT NULL
+	researchlevel TEXT  NOT NULL
 );
 CREATE TABLE IF NOT EXISTS units (
 	id    INT  NOT NULL PRIMARY KEY,
