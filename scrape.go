@@ -1,11 +1,9 @@
 package main
 
 import (
-	"database/sql"
-	"encoding/json"
+	"fmt"
 	"log"
-	"os"
-	"time"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/playwright-community/playwright-go"
@@ -19,292 +17,128 @@ const (
 )
 
 func main() {
-	start := time.Now()
-	log.Println("Starting scraper...")
-	scrape()
-	log.Printf("Completed in %s\n", time.Since(start))
-}
-
-func scrape() {
-	log.Println("Starting scraper...")
+	log.Println("Starting Playwright...")
 	pw, err := playwright.Run()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("could not start Playwright: %v", err)
 	}
-	browser, err := pw.Chromium.Launch()
+	defer pw.Stop()
+
+	log.Println("Launching Chromium...")
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Headless: playwright.Bool(true),
+	})
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("could not launch browser: %v", err)
 	}
+	defer browser.Close()
+
+	log.Println("Creating new page...")
 	page, err := browser.NewPage()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("could not create page: %v", err)
 	}
-	page.Goto("http://localhost:8000/?loadEvents=1")
-	time.Sleep(500 * time.Millisecond)
+	page.SetViewportSize(800, 600)
 
-	db, err := sql.Open("sqlite3", "../data/dom6api.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	populateItemsDB(db, page)
-	// populateSpellsDB(db, page)
-	// populateUnitsDB(db, page)
-	// populateMercsDB(db, page)
-	// populateSitesDB(db, page)
-
-	browser.Close()
-	pw.Stop()
-}
-
-func populateItemsDB(db *sql.DB, page playwright.Page) {
-	log.Println("Populating items table...")
-
-	_, err := db.Exec("DROP TABLE IF EXISTS items")
-	if err != nil {
-		log.Println("Failed to drop items table:", err)
-		return
+	url := "http://localhost:8001/?loadEvents=1"
+	log.Printf("Navigating to %s", url)
+	if _, err = page.Goto(url, playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateNetworkidle,
+	}); err != nil {
+		log.Fatalf("could not goto url %s: %v", url, err)
 	}
 
-	sqlContent, err := os.ReadFile("items.sql")
-	if err != nil {
-		log.Println("Failed to read items.sql:", err)
-		return
-	}
-	_, err = db.Exec(string(sqlContent))
-	if err != nil {
-		log.Println("Failed to create items table:", err)
-		return
-	}
+	types := []string{"item", "spell", "unit", "site", "merc", "event"}
 
-	itemsRaw, err := page.Evaluate(`DMI.modctx.itemdata`)
-	if err != nil {
-		log.Println("Failed to evaluate itemdata:", err)
-		return
-	}
+	for _, t := range types {
+		log.Printf("Clicking tab for %s...", t)
+		if _, err := page.Evaluate(fmt.Sprintf(`() => { document.getElementById('%s-page-button').click(); }`, t)); err != nil {
+			log.Fatalf("could not click tab for %s: %v", t, err)
+		}
 
-	itemsJSON, _ := json.Marshal(itemsRaw)
-	var items []map[string]interface{}
-	if err := json.Unmarshal(itemsJSON, &items); err != nil {
-		log.Println("Failed to unmarshal itemdata:", err)
-		return
-	}
+		selector := fmt.Sprintf("#%s-page div.fixed-overlay", t)
+		log.Printf("Waiting for overlay selector: %s", selector)
+		if _, err := page.WaitForSelector(selector); err != nil {
+			log.Fatalf("overlay selector not found for %s: %v", t, err)
+		}
 
-	log.Printf("Inserting %d items...\n", len(items))
-	stmt, err := db.Prepare("INSERT INTO items (id, name, type, constlevel, mainlevel, mpath, gemcost) VALUES (?, ?, ?, ?, ?, ?, ?)")
-	if err != nil {
-		log.Println("Failed to prepare statement:", err)
-		return
-	}
-	defer stmt.Close()
-
-	for _, item := range items {
-		_, err := stmt.Exec(item["id"], item["name"], item["type"], item["constlevel"], item["mainlevel"], item["mpath"], item["gemcost"])
+		exprCount := fmt.Sprintf(`() => DMI.modctx['%sdata'].length`, t)
+		result, err := page.Evaluate(exprCount)
 		if err != nil {
-			log.Printf("Insert failed for %v: %v", item["id"], err)
+			log.Fatalf("could not evaluate count for %s: %v", t, err)
+		}
+
+		var count int
+		switch v := result.(type) {
+		case float64:
+			count = int(v)
+		case int:
+			count = v
+		default:
+			log.Fatalf("unexpected type for count: %T", v)
+		}
+		log.Printf("%d entities found for %s", count, t)
+
+		for i := 0; i < count; i++ {
+			log.Printf("[%s] Rendering entity %d/%d...", t, i+1, count)
+
+			exprRender := fmt.Sprintf(`(i) => {
+				const e = DMI.modctx['%sdata'][i];
+				const container = document.querySelector('#%s-page div.fixed-overlay');
+				container.innerHTML = e.renderOverlay(e).outerHTML || e.renderOverlay(e);
+				return e.id;
+			}`, t, t)
+
+			idAny, err := page.Evaluate(exprRender, i)
+			if err != nil {
+				log.Printf("could not render overlay for %s index %d, skipping: %v", t, i, err)
+				continue
+			}
+			entityID := fmt.Sprintf("%v", idAny)
+
+			waitJS := fmt.Sprintf(`() => {
+				const el = document.querySelector('#%s-page div.fixed-overlay');
+				return el && el.innerHTML.trim().length > 0;
+			}`, t)
+
+			if _, err := page.WaitForFunction(waitJS, playwright.PageWaitForFunctionOptions{
+				Timeout: playwright.Float(15000),
+			}); err != nil {
+				log.Printf("overlay did not render for %s id %s, skipping: %v", t, entityID, err)
+				continue
+			}
+
+			overlay, err := page.QuerySelector(selector)
+			if err != nil || overlay == nil {
+				log.Printf("overlay element missing for %s id %s, skipping: %v", t, entityID, err)
+				continue
+			}
+
+			path := filepath.Join("Data", t+"s", entityID+".png")
+
+			// Retry screenshot up to 3 times
+			success := false
+			for attempt := 1; attempt <= 3; attempt++ {
+				if _, err := overlay.Screenshot(playwright.ElementHandleScreenshotOptions{
+					Path: playwright.String(path),
+				}); err != nil {
+					log.Printf("Attempt %d: could not screenshot overlay for %s id %s: %v", attempt, t, entityID, err)
+				} else {
+					success = true
+					break
+				}
+			}
+			if !success {
+				log.Printf("Skipping %s id %s after 3 failed attempts", t, entityID)
+				continue
+			}
+
+			log.Printf("Screenshot saved for %s id %s", t, entityID)
+
+			// small delay to avoid rate limiting
+			// time.Sleep(150 * time.Millisecond)
 		}
 	}
 
-	log.Println("Items table done.")
+	log.Println("Done. Closing browser...")
 }
-
-// func populateSpellsDB(page playwright.Page) {
-// 	log.Println("Populating spells DB...")
-// 	db, err := sql.Open("sqlite3", "../data/spells.db")
-// 	if err != nil {
-// 		log.Println("Failed to open spells DB:", err)
-// 		return
-// 	}
-// 	defer db.Close()
-// 	db.Exec("DROP TABLE IF EXISTS spells")
-// 	sqlContent, _ := ioutil.ReadFile("spells.sql")
-// 	db.Exec(string(sqlContent))
-
-// 	spellsRaw, _ := page.Evaluate(`DMI.modctx.spelldata.filter(spell => spell.research != "unresearchable")`)
-// 	spellsJSON, _ := json.Marshal(spellsRaw)
-// 	var spells []map[string]interface{}
-// 	json.Unmarshal(spellsJSON, &spells)
-// 	log.Printf("Inserting %d spells...\n", len(spells))
-
-// 	stmt, _ := db.Prepare("INSERT INTO spells (id, name, gemcost, mpath, type, school, researchlevel) VALUES (?, ?, ?, ?, ?, ?, ?)")
-// 	defer stmt.Close()
-// 	schools := []string{"Conjuration", "Alteration", "Evocation", "Construction", "Enchantment", "Thaumaturgy", "Blood", "Divine"}
-// 	for _, s := range spells {
-// 		school := int(s["school"].(float64))
-// 		stmt.Exec(s["id"], s["name"], s["gemcost"], s["mpath"], s["type"], schools[school], s["researchlevel"])
-// 	}
-// 	log.Println("Spells DB done.")
-// }
-
-// func populateUnitsDB(page playwright.Page) {
-// 	log.Println("Populating units DB...")
-// 	db, err := sql.Open("sqlite3", "../data/units.db")
-// 	if err != nil {
-// 		log.Println("Failed to open units DB:", err)
-// 		return
-// 	}
-// 	defer db.Close()
-// 	sqlContent, _ := ioutil.ReadFile("units.sql")
-// 	for _, q := range splitSQL(string(sqlContent)) {
-// 		db.Exec(q)
-// 	}
-
-// 	unitsRaw, _ := page.Evaluate(`DMI.modctx.unitdata.filter(unit => Number.isInteger(unit.id))`)
-// 	unitsJSON, _ := json.Marshal(unitsRaw)
-// 	var units []map[string]interface{}
-// 	json.Unmarshal(unitsJSON, &units)
-// 	log.Printf("Inserting %d units...\n", len(units))
-
-// 	stmt, _ := db.Prepare("INSERT INTO units (id, name, hp, size) VALUES (?, ?, ?, ?)")
-// 	defer stmt.Close()
-// 	for _, u := range units {
-// 		stmt.Exec(u["id"], u["fullname"], u["hp"], u["size"])
-// 	}
-
-// 	populatePropsTable(page, db, "unit", len(units),
-// 		[]string{"immobile", "mpath"},
-// 		[]string{},
-// 		[]string{"randompaths"},
-// 		[]string{"id", "name", "hp", "size"},
-// 		[]string{"armor", "cheapgod20", "cheapgod40", "createdby", "dupes", "eracodes", "nations", "recruitedby", "sprite", "summonedby", "summonedfrom", "weapons"})
-// 	log.Println("Units DB done.")
-// }
-
-// func populateMercsDB(page playwright.Page) {
-// 	log.Println("Populating mercs DB...")
-// 	db, err := sql.Open("sqlite3", "../data/mercs.db")
-// 	if err != nil {
-// 		log.Println("Failed to open mercs DB:", err)
-// 		return
-// 	}
-// 	defer db.Close()
-// 	db.Exec("DROP TABLE IF EXISTS mercs")
-// 	sqlContent, _ := ioutil.ReadFile("mercs.sql")
-// 	db.Exec(string(sqlContent))
-
-// 	mercsRaw, _ := page.Evaluate(`DMI.modctx.mercdata`)
-// 	mercsJSON, _ := json.Marshal(mercsRaw)
-// 	var mercs []map[string]interface{}
-// 	json.Unmarshal(mercsJSON, &mercs)
-// 	log.Printf("Inserting %d mercs...\n", len(mercs))
-
-// 	stmt, _ := db.Prepare("INSERT INTO mercs (id, name, bossname, commander_id, unit_id, nrunits) VALUES (?, ?, ?, ?, ?, ?)")
-// 	defer stmt.Close()
-// 	for _, m := range mercs {
-// 		stmt.Exec(m["id"], m["name"], m["bossname"], m["com"], m["unit"], m["nrunits"])
-// 	}
-// 	log.Println("Mercs DB done.")
-// }
-
-// func populateSitesDB(page playwright.Page) {
-// 	log.Println("Populating sites DB...")
-// 	db, err := sql.Open("sqlite3", "../data/sites.db")
-// 	if err != nil {
-// 		log.Println("Failed to open sites DB:", err)
-// 		return
-// 	}
-// 	defer db.Close()
-// 	sqlContent, _ := ioutil.ReadFile("sites.sql")
-// 	for _, q := range splitSQL(string(sqlContent)) {
-// 		db.Exec(q)
-// 	}
-
-// 	sitesRaw, _ := page.Evaluate(`DMI.modctx.sitedata`)
-// 	sitesJSON, _ := json.Marshal(sitesRaw)
-// 	var sites []map[string]interface{}
-// 	json.Unmarshal(sitesJSON, &sites)
-// 	log.Printf("Inserting %d sites...\n", len(sites))
-
-// 	stmt, _ := db.Prepare("INSERT INTO sites (id, name, path, level, rarity) VALUES (?, ?, ?, ?, ?)")
-// 	defer stmt.Close()
-// 	rarities := map[float64]string{0: "Common", 1: "Uncommon", 2: "Rare", 5: "Never random", 11: "Throne lvl1", 12: "Throne lvl2", 13: "Throne lvl3"}
-// 	for _, s := range sites {
-// 		r := s["rarity"].(float64)
-// 		stmt.Exec(s["id"], s["name"], s["path"], s["level"], rarities[r])
-// 	}
-
-// 	populatePropsTable(page, db, "site", len(sites),
-// 		[]string{"F", "A", "W", "E", "S", "D", "N", "B", "G"},
-// 		[]string{"com", "futurenations", "hcom", "hmon", "mon", "nations", "provdef", "scales", "sum"},
-// 		[]string{},
-// 		[]string{"id", "name", "path", "level", "rarity", "renderOverlay", "matchProperty", "searchable", "listed_gempath", "mpath2", "scale1", "scale2", "sprite", "url"},
-// 		[]string{})
-// 	log.Println("Sites DB done.")
-// }
-
-// func populatePropsTable(page playwright.Page, db *sql.DB, category string, numEntities int,
-// 	scalarProps, arrayProps, arrayJSONProps, excludedProps, unreadableProps []string) {
-// 	log.Printf("[%s] Populating props...\n", category)
-// 	stmt, _ := db.Prepare(fmt.Sprintf("INSERT INTO %s_props (%s_id, prop_name, arrayprop_ix, value) VALUES (?, ?, ?, ?)", category, category))
-// 	defer stmt.Close()
-
-// 	for i := 0; i < numEntities; i++ {
-// 		propsRaw, _ := page.Evaluate(fmt.Sprintf(`(()=>{const e = DMI.modctx.%sdata[%d]; %s return e;})()`,
-// 			category, i, buildDeletePropsJS(unreadableProps)))
-// 		propsJSON, _ := json.Marshal(propsRaw)
-// 		var props map[string]interface{}
-// 		json.Unmarshal(propsJSON, &props)
-
-// 		id := props["id"]
-// 		for k, v := range props {
-// 			if contains(excludedProps, k) {
-// 				continue
-// 			} else if contains(arrayProps, k) || contains(arrayJSONProps, k) {
-// 				arr, ok := v.([]interface{})
-// 				if !ok {
-// 					continue
-// 				}
-// 				for ix, val := range arr {
-// 					valStr := val
-// 					if contains(arrayJSONProps, k) {
-// 						js, _ := json.Marshal(val)
-// 						valStr = string(js)
-// 					}
-// 					stmt.Exec(id, k, ix, valStr)
-// 				}
-// 			} else if contains(scalarProps, k) {
-// 				stmt.Exec(id, k, nil, v)
-// 			}
-// 		}
-// 		if i%50 == 0 {
-// 			log.Printf("[%s] Props processed: %d/%d\n", category, i, numEntities)
-// 		}
-// 	}
-// 	log.Printf("[%s] Props done.\n", category)
-// }
-
-// func splitSQL(sqlContent string) []string {
-// 	raw := []rune(sqlContent)
-// 	var queries []string
-// 	var buf []rune
-// 	for _, r := range raw {
-// 		if r == ';' {
-// 			queries = append(queries, string(buf))
-// 			buf = []rune{}
-// 		} else {
-// 			buf = append(buf, r)
-// 		}
-// 	}
-// 	if len(buf) > 0 {
-// 		queries = append(queries, string(buf))
-// 	}
-// 	return queries
-// }
-
-// func buildDeletePropsJS(props []string) string {
-// 	js := ""
-// 	for _, p := range props {
-// 		js += fmt.Sprintf("delete e['%s'];", p)
-// 	}
-// 	return js
-// }
-
-// func contains(arr []string, val string) bool {
-// 	for _, a := range arr {
-// 		if a == val {
-// 			return true
-// 		}
-// 	}
-// 	return false
-// }

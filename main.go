@@ -14,7 +14,17 @@ package main
 // 	InspectorPort = 8001
 // 	APIPort       = 8002
 // )
+// func EnsureFolders() {
+// 	base := "Data"
+// 	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
 
+// 	for _, cat := range categories {
+// 		path := filepath.Join(base, cat)
+// 		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+// 			log.Fatalf("could not create folder %s: %v", path, err)
+// 		}
+// 	}
+// }
 // func dbcheck(filename string, sqlFile string) *sql.DB {
 // 	log.Println("Checking database:", filename)
 // 	db, err := sql.Open("sqlite", filename)
