@@ -129,19 +129,33 @@ func scrape() {
 
 		for i := 0; i < count; i++ {
 			entityAny, err := page.Evaluate(fmt.Sprintf(`(i) => {
-				const e = DMI.modctx['%sdata'][i];
-				const container = document.querySelector('#%s-page div.fixed-overlay');
-				container.innerHTML = e.renderOverlay(e).outerHTML || e.renderOverlay(e);
-				return { e, ready: container.innerHTML.trim().length > 0 };
-			}`, t, t), i)
+	const e = DMI.modctx['%sdata'][i];
+	const container = document.querySelector('#%s-page div.fixed-overlay');
+	container.innerHTML = e.renderOverlay(e).outerHTML || e.renderOverlay(e);
+	return e;
+}`, t, t), i)
 			if err != nil {
 				log.Printf("main: could not render entity %d for %s: %v", i, t, err)
 				continue
 			}
 
-			entityMap := entityAny.(map[string]interface{})["e"].(map[string]interface{})
-			if !entityAny.(map[string]interface{})["ready"].(bool) {
-				log.Printf("main: overlay not ready for %s id %v", t, entityMap["id"])
+			overlaySelector := fmt.Sprintf("#%s-page div.fixed-overlay", t)
+			_, err = page.WaitForFunction(
+				fmt.Sprintf(`() => {
+		const el = document.querySelector('%s');
+		return el && el.innerHTML.trim().length > 0;
+	}`, overlaySelector),
+				nil, // you can pass nil as the second argument
+				playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}, // optional timeout
+			)
+			if err != nil {
+				log.Printf("main: overlay did not render for %s entity %d: %v", t, i, err)
+				continue
+			}
+
+			entityMap, ok := entityAny.(map[string]interface{})
+			if !ok {
+				log.Printf("main: entity %d for %s is not a map, skipping", i, t)
 				continue
 			}
 
@@ -206,7 +220,17 @@ func populate(page playwright.Page, db *sql.DB, category string, entityIndex int
 		}
 
 	case "unit":
+
 		idVal, ok := entityMap["id"]
+		if idVal == 150 {
+			jsonData, err := page.Evaluate(fmt.Sprintf(`() => JSON.stringify(DMI.modctx['%sdata'][%d], null, 2)`, category, entityIndex))
+			if err != nil {
+				log.Printf("populate: failed to fetch JSON for %s #%d: %v", category, entityIndex, err)
+				return
+			}
+			log.Printf("unit JSON:\n%s", jsonData)
+		}
+
 		if !ok {
 			log.Printf("populate: skipping unit, missing id")
 			return
@@ -218,26 +242,21 @@ func populate(page playwright.Page, db *sql.DB, category string, entityIndex int
 		}
 
 		name, _ := entityMap["name"].(string)
-
 		hp, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["hp"]))
 		size, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["size"]))
 		mount, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["mount"]))
+		rider, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["rider"]))
 		coRider, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["co_rider"]))
 
-		_, err = db.Exec(
-			"INSERT OR REPLACE INTO units (id, name, hp, size, mount, co_rider) VALUES (?, ?, ?, ?, ?, ?)",
-			id, name, hp, size, mount, coRider,
-		)
-		if err != nil {
-			log.Printf("populate: failed to insert unit %d: %v", id, err)
-		}
+		log.Printf("unit: id=%d name=%s hp=%d size=%d mount=%d rider=%d co_rider=%d",
+			id, name, hp, size, mount, rider, coRider)
 
 	}
 
 	categoryFields := map[string][]string{
 		"item":  {"id", "name", "type", "constlevel", "mainlevel", "mpath", "gemcost"},
 		"spell": {"id", "name", "gemcost", "mpath", "type", "school", "researchlevel"},
-		"unit":  {"id", "fullname", "hp", "size", "mount", "co_rider"},
+		"unit":  {"id", "fullname", "hp", "size", "mount", "rider", "co_rider"},
 		"merc":  {"id", "name", "bossname", "com", "unit", "nrunits"},
 		"site":  {"id", "name", "path", "level", "rarity"},
 		"event": {"id", "name"},
