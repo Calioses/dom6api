@@ -1,14 +1,6 @@
 package main
 
 // import (
-// 	"database/sql"
-// 	"fmt"
-// 	"log"
-// 	"os"
-// 	"os/exec"
-// 	"path/filepath"
-// 	"time"
-
 // 	_ "github.com/mattn/go-sqlite3"
 // )
 
@@ -20,6 +12,16 @@ package main
 // )
 
 // func dbcheck(filename string, sqlFile string) *sql.DB {
+// 	base := "Data"
+// 	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
+
+// 	for _, cat := range categories {
+// 		path := filepath.Join(base, cat)
+// 		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+// 			log.Fatalf("could not create folder %s: %v", path, err)
+// 		}
+// 	}
+
 // 	log.Println("Opening database:", filename)
 // 	db, err := sql.Open("sqlite3", filename)
 // 	if err != nil {
@@ -38,18 +40,6 @@ package main
 
 // 	log.Println("dbcheck: SQL script executed successfully.")
 // 	return db
-// }
-
-// func EnsureFolders() {
-// 	base := "Data"
-// 	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
-
-// 	for _, cat := range categories {
-// 		path := filepath.Join(base, cat)
-// 		if err := os.MkdirAll(path, os.ModePerm); err != nil {
-// 			log.Fatalf("could not create folder %s: %v", path, err)
-// 		}
-// 	}
 // }
 
 // func main() {

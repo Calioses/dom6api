@@ -25,23 +25,7 @@ CREATE TABLE IF NOT EXISTS sites (
 	rarity  TEXT NOT NULL COLLATE NOCASE CHECK(rarity IN ('Common','Uncommon','Rare','Never random','Throne lvl1','Throne lvl2','Throne lvl3'))
 );
 
-CREATE TABLE IF NOT EXISTS site_props (
-	site_id      INT NOT NULL,
-	prop_name    TEXT NOT NULL,
-	value        TEXT NOT NULL,
-	arrayprop_ix INT,
-	PRIMARY KEY (site_id, prop_name, arrayprop_ix),
-	FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
-);
 
-CREATE TABLE IF NOT EXISTS unit_props (
-	unit_id      INT NOT NULL,
-	prop_name    TEXT NOT NULL,
-	value        TEXT NOT NULL,
-	arrayprop_ix INT,
-	PRIMARY KEY (unit_id, prop_name, arrayprop_ix),
-	FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE
-);
 CREATE TABLE IF NOT EXISTS units (
 	id    INT  NOT NULL PRIMARY KEY,
 	name  TEXT NOT NULL COLLATE NOCASE,
@@ -60,14 +44,7 @@ CREATE TABLE IF NOT EXISTS spells (
 	school        TEXT NOT NULL CHECK(school IN ('Conjuration','Alteration','Evocation','Construction','Enchantment','Thaumaturgy','Blood','Divine')),
 	researchlevel TEXT  NOT NULL
 );
-CREATE TABLE IF NOT EXISTS units (
-	id    INT  NOT NULL PRIMARY KEY,
-	name  TEXT NOT NULL COLLATE NOCASE,
-	hp    INT  NOT NULL,
-	size  INT  NOT NULL CHECK(size >= 1 AND size <= 10),
-    mount INT,
-	co_rider INT
-);
+
 
 
 

@@ -2,12 +2,10 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -23,23 +21,21 @@ const (
 )
 
 var (
-	schoolMap = map[float64]string{
-		1: "Conjuration",
-		2: "Alteration",
-		3: "Evocation",
-		4: "Construction",
-		5: "Enchantment",
-		6: "Thaumaturgy",
-		7: "Blood",
-		8: "Divine",
-	}
-	rarities       = map[int]string{0: "Common", 1: "Uncommon", 2: "Rare", 5: "Never random", 11: "Throne lvl1", 12: "Throne lvl2", 13: "Throne lvl3"}
-	jsonArrayProps = []string{"randompaths"}
-	unitExcluded   = map[string]struct{}{"id": {}, "fullname": {}, "hp": {}, "size": {}, "mount": {}, "co_rider": {}}
-	siteExcluded   = map[string]struct{}{"id": {}, "name": {}, "path": {}, "level": {}, "rarity": {}}
+	schoolMap = map[float64]string{1: "Conjuration", 2: "Alteration", 3: "Evocation", 4: "Construction", 5: "Enchantment", 6: "Thaumaturgy", 7: "Blood", 8: "Divine"}
+	rarities  = map[int]string{0: "Common", 1: "Uncommon", 2: "Rare", 5: "Never random", 11: "Throne lvl1", 12: "Throne lvl2", 13: "Throne lvl3"}
 )
 
 func dbcheck(filename string, sqlFile string) *sql.DB {
+	base := "Data"
+	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
+
+	for _, cat := range categories {
+		path := filepath.Join(base, cat)
+		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+			log.Fatalf("could not create folder %s: %v", path, err)
+		}
+	}
+
 	log.Println("Opening database:", filename)
 	db, err := sql.Open("sqlite3", filename)
 	if err != nil {
@@ -59,6 +55,7 @@ func dbcheck(filename string, sqlFile string) *sql.DB {
 	log.Println("dbcheck: SQL script executed successfully.")
 	return db
 }
+
 func main() {
 	scrape()
 }
@@ -96,7 +93,13 @@ func scrape() {
 		log.Fatalf("main: could not goto url %s: %v", url, err)
 	}
 
-	// var types = []string{"item", "spell", "unit", "site", "merc", "event"}
+	db, err := sql.Open("sqlite3", "Data/dom6api.db")
+	if err != nil {
+		log.Fatalf("main: could not open db: %v", err)
+	}
+	defer db.Close()
+	// types     = []string{"item", "spell", "unit", "site", "merc", "event"}
+
 	var types = []string{"unit"}
 
 	for _, t := range types {
@@ -112,11 +115,7 @@ func scrape() {
 		}
 
 		exprCount := fmt.Sprintf(`() => DMI.modctx['%sdata'].length`, t)
-		result, err := page.Evaluate(exprCount)
-		if err != nil {
-			log.Fatalf("main: could not evaluate count for %s: %v", t, err)
-		}
-
+		result, _ := page.Evaluate(exprCount)
 		var count int
 		switch v := result.(type) {
 		case float64:
@@ -129,74 +128,43 @@ func scrape() {
 		log.Printf("%d entities found for %s", count, t)
 
 		for i := 0; i < count; i++ {
-			log.Printf("[%s] Rendering entity %d/%d...", t, i+1, count)
-
 			entityAny, err := page.Evaluate(fmt.Sprintf(`(i) => {
-			const e = DMI.modctx['%sdata'][i];
-			const container = document.querySelector('#%s-page div.fixed-overlay');
-			container.innerHTML = e.renderOverlay(e).outerHTML || e.renderOverlay(e);
-			return e;
-		}`, t, t), i)
+				const e = DMI.modctx['%sdata'][i];
+				const container = document.querySelector('#%s-page div.fixed-overlay');
+				container.innerHTML = e.renderOverlay(e).outerHTML || e.renderOverlay(e);
+				return { e, ready: container.innerHTML.trim().length > 0 };
+			}`, t, t), i)
 			if err != nil {
-				log.Printf("main: could not render/fetch entity %d for %s, skipping: %v", i, t, err)
+				log.Printf("main: could not render entity %d for %s: %v", i, t, err)
 				continue
 			}
 
-			entityMap, ok := entityAny.(map[string]interface{})
-			if !ok {
-				log.Printf("main: unexpected type for entity %d in %s", i, t)
+			entityMap := entityAny.(map[string]interface{})["e"].(map[string]interface{})
+			if !entityAny.(map[string]interface{})["ready"].(bool) {
+				log.Printf("main: overlay not ready for %s id %v", t, entityMap["id"])
 				continue
 			}
 
 			entityID := fmt.Sprintf("%v", entityMap["id"])
-
-			waitJS := fmt.Sprintf(`() => {
-			const el = document.querySelector('#%s-page div.fixed-overlay');
-			return el && el.innerHTML.trim().length > 0;
-		}`, t)
-			if _, err := page.WaitForFunction(waitJS, playwright.PageWaitForFunctionOptions{
-				Timeout: playwright.Float(15000),
-			}); err != nil {
-				log.Printf("main: overlay did not render for %s id %s, skipping: %v", t, entityID, err)
-				continue
-			}
-
-			overlay, err := page.QuerySelector(selector)
-			if err != nil || overlay == nil {
-				log.Printf("main: overlay element missing for %s id %s, skipping: %v", t, entityID, err)
-				continue
-			}
+			overlay, _ := page.QuerySelector(selector)
 
 			path := filepath.Join("Data", t+"s", entityID+".png")
-			success := false
 			for attempt := 1; attempt <= 3; attempt++ {
-				if _, err := overlay.Screenshot(playwright.ElementHandleScreenshotOptions{
-					Path: playwright.String(path),
-				}); err != nil {
-					log.Printf("main: Attempt %d: could not screenshot overlay for %s id %s: %v", attempt, t, entityID, err)
-				} else {
-					success = true
+				if _, err := overlay.Screenshot(playwright.ElementHandleScreenshotOptions{Path: playwright.String(path)}); err == nil {
 					break
 				}
 			}
-			if !success {
-				log.Printf("main: Skipping %s id %s after 3 failed attempts", t, entityID)
-				continue
-			}
 
-			populate(page, "Data/dom6api.db", t, i)
+			populate(page, db, t, i) // reuse open DB
+
+			log.Printf("[%s] Rendering entity %d/%d...", t, i+1, count)
 		}
 	}
 
 	log.Println("main: Done. Closing browser...")
 }
 
-func populate(page playwright.Page, dbFile string, category string, entityIndex int) {
-	db, err := sql.Open("sqlite3", dbFile)
-	if err != nil {
-		log.Fatalf("populate: could not open db: %v", err)
-	}
-	defer db.Close()
+func populate(page playwright.Page, db *sql.DB, category string, entityIndex int) {
 
 	result, err := page.Evaluate(fmt.Sprintf("() => DMI.modctx['%sdata'][%d]", category, entityIndex))
 	if err != nil {
@@ -213,61 +181,21 @@ func populate(page playwright.Page, dbFile string, category string, entityIndex 
 	switch category {
 	case "spell":
 		if entityMap["gemcost"] == nil {
-			entityMap["gemcost"] = 0
+			entityMap["gemcost"] = "0"
 		}
 
-		schoolVal, ok := entityMap["school"]
-		if !ok {
+		v, ok := entityMap["school"].(string)
+		if !ok || v == "" || v == "-1" {
 			return
 		}
-
-		var school string
-		skip := false
-		switch v := schoolVal.(type) {
-		case float64:
-			switch {
-			case v == -1:
-				skip = true
-			case schoolMap[v] != "":
-				school = schoolMap[v]
-			default:
-				skip = true
-			}
-		case string:
-			switch {
-			case v == "-1" || v == "":
-				skip = true
-			default:
-				f, err := strconv.ParseFloat(v, 64)
-				if err == nil {
-					if schoolMap[f] != "" {
-						school = schoolMap[f]
-					} else {
-						skip = true
-					}
-				} else {
-					school = v
-				}
-			}
-		default:
-			skip = true
-		}
-
-		if skip {
-			log.Printf("Skipping spell ID %v due to invalid school", entityMap["id"])
-			return
-		}
-		entityMap["school"] = school
-
-		// normalize researchlevel to integer
-		if rl, ok := entityMap["researchlevel"].(string); ok {
-			if val, err := strconv.Atoi(rl); err == nil {
-				entityMap["researchlevel"] = val
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			if school := schoolMap[f]; school != "" {
+				entityMap["school"] = school
 			} else {
-				entityMap["researchlevel"] = 0
+				return
 			}
-		} else if _, ok := entityMap["researchlevel"].(float64); !ok {
-			entityMap["researchlevel"] = 0
+		} else {
+			entityMap["school"] = v
 		}
 
 	case "site":
@@ -278,46 +206,33 @@ func populate(page playwright.Page, dbFile string, category string, entityIndex 
 		}
 
 	case "unit":
-		// normalize numeric fields
-		if hp, ok := entityMap["hp"].(string); ok {
-			if val, err := strconv.Atoi(hp); err == nil {
-				entityMap["hp"] = val
-			} else {
-				entityMap["hp"] = 0
-			}
+		idVal, ok := entityMap["id"]
+		if !ok {
+			log.Printf("populate: skipping unit, missing id")
+			return
+		}
+		id, err := strconv.Atoi(fmt.Sprintf("%v", idVal))
+		if err != nil {
+			log.Printf("populate: skipping unit, invalid id: %v", idVal)
+			return
 		}
 
-		if size, ok := entityMap["size"].(string); ok {
-			if val, err := strconv.Atoi(size); err == nil {
-				entityMap["size"] = val
-			} else {
-				entityMap["size"] = 1
-			}
-		}
+		name, _ := entityMap["name"].(string)
 
-		if mount, ok := entityMap["mount"].(string); ok {
-			if val, err := strconv.Atoi(mount); err == nil {
-				entityMap["mount"] = val
-			} else {
-				entityMap["mount"] = 0
-			}
-		}
+		hp, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["hp"]))
+		size, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["size"]))
+		mount, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["mount"]))
+		coRider, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["co_rider"]))
 
-		if co, ok := entityMap["co_rider"].(string); ok {
-			if val, err := strconv.Atoi(co); err == nil {
-				entityMap["co_rider"] = val
-			} else {
-				entityMap["co_rider"] = 0
-			}
+		_, err = db.Exec(
+			"INSERT OR REPLACE INTO units (id, name, hp, size, mount, co_rider) VALUES (?, ?, ?, ?, ?, ?)",
+			id, name, hp, size, mount, coRider,
+		)
+		if err != nil {
+			log.Printf("populate: failed to insert unit %d: %v", id, err)
 		}
-
-		log.Printf("[%s] Unit ID %v | Name: %v | HP: %v | Size: %v | Mount: %v | Co-rider: %v",
-			category, entityMap["id"], entityMap["name"], entityMap["hp"], entityMap["size"], entityMap["mount"], entityMap["co_rider"])
 
 	}
-
-	// out, _ := json.MarshalIndent(entityMap, "", "  ")
-	// log.Printf("[%s] Entity %d: %s", category, entityIndex, string(out))
 
 	categoryFields := map[string][]string{
 		"item":  {"id", "name", "type", "constlevel", "mainlevel", "mpath", "gemcost"},
@@ -350,52 +265,9 @@ func populate(page playwright.Page, dbFile string, category string, entityIndex 
 
 	values := make([]interface{}, len(fields))
 	for i, f := range fields {
-		values[i] = entityMap[f]
+		values[i] = fmt.Sprintf("%v", entityMap[f])
 	}
 	if _, err := stmt.Exec(values...); err != nil {
 		log.Printf("populate: exec error for %s: %v", category, err)
-	}
-
-	if category == "units" || category == "sites" {
-		excluded := unitExcluded
-		if category == "sites" {
-			excluded = siteExcluded
-		}
-		stmtPropsSQL := fmt.Sprintf(
-			"INSERT INTO %s_props (%s_id, prop_name, value, arrayprop_ix) VALUES (?, ?, ?, ?)",
-			category, category,
-		)
-		stmtProps, err := db.Prepare(stmtPropsSQL)
-		if err != nil {
-			log.Printf("populate: could not prepare props insert for %s: %v", category, err)
-			return
-		}
-		defer stmtProps.Close()
-		populateProps(stmtProps, entityMap["id"], entityMap, excluded)
-	}
-}
-
-func populateProps(stmt *sql.Stmt, id interface{}, entity map[string]interface{}, excluded map[string]struct{}) {
-	for prop, val := range entity {
-		if _, skip := excluded[prop]; skip {
-			continue
-		}
-		switch v := val.(type) {
-		case []interface{}:
-			for i, elem := range v {
-				outVal := fmt.Sprintf("%v", elem)
-				if slices.Contains(jsonArrayProps, prop) {
-					b, _ := json.Marshal(elem)
-					outVal = string(b)
-				}
-				if _, err := stmt.Exec(id, prop, outVal, i); err != nil {
-					log.Printf("populateProps: could not exec stmt for prop %s: %v", prop, err)
-				}
-			}
-		default:
-			if _, err := stmt.Exec(id, prop, fmt.Sprintf("%v", v), nil); err != nil {
-				log.Printf("populateProps: could not exec stmt for prop %s: %v", prop, err)
-			}
-		}
 	}
 }
