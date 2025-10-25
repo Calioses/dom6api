@@ -95,15 +95,27 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 		enableFuzzy := queryParams.Get("match") == "fuzzy"
 		queryParams.Del("match")
 
-		pathSuffix := strings.TrimPrefix(request.URL.Path, "/"+table+"/")
-		if pathSuffix != "" {
-			cleanID := cleanRe.ReplaceAllString(pathSuffix, "")
-			if cleanID != "" {
+		for k, v := range queryParams {
+			lower := strings.ToLower(k)
+			if lower != k {
+				queryParams.Del(k)
+				queryParams.Set(lower, v[0])
+			}
+		}
+
+		if idPart := strings.TrimPrefix(request.URL.Path, "/"+table+"/"); idPart != "" {
+			if cleanID := cleanRe.ReplaceAllString(idPart, ""); cleanID != "" {
 				queryParams.Set("id", cleanID)
 			}
 		}
 
-		rows, err := db.Query("SELECT * FROM " + table)
+		var rows *sql.Rows
+		var err error
+		if ids, ok := queryParams["id"]; ok && len(ids) == 1 && !enableFuzzy {
+			rows, err = db.Query("SELECT * FROM "+table+" WHERE id = ?", ids[0])
+		} else {
+			rows, err = db.Query("SELECT * FROM " + table)
+		}
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
 			return
@@ -111,8 +123,9 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 		defer rows.Close()
 
 		cols, _ := rows.Columns()
-		var results []map[string]any
+		results := make([]map[string]any, 0)
 
+	rowsLoop:
 		for rows.Next() {
 			values := make([]any, len(cols))
 			for i := range values {
@@ -132,53 +145,23 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 				}
 			}
 
-			matched := true
 			for key, vals := range queryParams {
 				if _, ok := columnSet[key]; !ok {
 					http.Error(w, fmt.Sprintf(`{"error":"unknown column '%s'"}`, key), http.StatusBadRequest)
 					return
 				}
 
-				queryVal := cleanRe.ReplaceAllString(vals[0], "")
-				colVal := row[key]
+				colVal := strings.ToLower(fmt.Sprint(row[key]))
+				queryVal := strings.ToLower(cleanRe.ReplaceAllString(vals[0], ""))
 
-				switch v := colVal.(type) {
-				case int64, int32, int:
-					q, err := fmt.Sscan(queryVal)
-					if err != nil || fmt.Sprint(v) != fmt.Sprint(q) {
-						matched = false
-						break
-					}
-				case float64, float32:
-					q, err := fmt.Sscan(queryVal)
-					if err != nil || fmt.Sprint(v) != fmt.Sprint(q) {
-						matched = false
-						break
-					}
-				case string:
-					cv := strings.ToLower(v)
-					qv := strings.ToLower(queryVal)
-					if enableFuzzy {
-						if !strings.Contains(cv, qv) && fuzzy.RankMatch(qv, cv) < FuzzyScore {
-							matched = false
-							break
-						}
-					} else if cv != qv {
-						matched = false
-						break
-					}
-				default:
-					if fmt.Sprint(v) != queryVal {
-						matched = false
-						break
-					}
+				if (!enableFuzzy && colVal != queryVal) ||
+					(enableFuzzy && !strings.Contains(colVal, queryVal) && fuzzy.RankMatch(queryVal, colVal) < FuzzyScore) {
+					continue rowsLoop
 				}
 			}
 
-			if matched {
-				row["image"] = fmt.Sprintf("Data/%s/%v.png", table, row["id"])
-				results = append(results, row)
-			}
+			row["image"] = fmt.Sprintf("Data/%s/%v.png", table, row["id"])
+			results = append(results, row)
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{table: results})
@@ -192,17 +175,8 @@ func StartServer(dbFile string, addr string) error {
 	}
 
 	for _, table := range tables {
-		http.HandleFunc("/"+table, handleQuery(db, table))
 		http.HandleFunc("/"+table+"/", handleQuery(db, table))
 	}
 
 	return http.ListenAndServe(addr, nil)
 }
-
-// func main() {
-// 	if err := StartServer("dom6api.db", ":8080"); err != nil {
-// 		log.Fatal(err)
-// 	}
-// }
-
-// --- Scrape ---
