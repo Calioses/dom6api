@@ -85,42 +85,36 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 
 		table = cleanRe.ReplaceAllString(table, "")
-		columnSet, tableExists := tableColumnSets[table]
-		if !tableExists {
+		columnSet, ok := tableColumnSets[table]
+		if !ok {
 			http.Error(w, `{"error":"unknown table"}`, http.StatusBadRequest)
 			return
 		}
 
 		queryParams := request.URL.Query()
-		enableFuzzyMatching := queryParams.Get("match") == "fuzzy"
+		enableFuzzy := queryParams.Get("match") == "fuzzy"
 		queryParams.Del("match")
 
-		if idPart := strings.TrimPrefix(request.URL.Path, "/"+table+"/"); idPart != "" {
-			if cleanID := cleanRe.ReplaceAllString(idPart, ""); cleanID != "" {
+		pathSuffix := strings.TrimPrefix(request.URL.Path, "/"+table+"/")
+		if pathSuffix != "" {
+			cleanID := cleanRe.ReplaceAllString(pathSuffix, "")
+			if cleanID != "" {
 				queryParams.Set("id", cleanID)
 			}
 		}
 
-		var rows *sql.Rows
-		var err error
-
-		// Optimize for ID lookups
-		if ids, ok := queryParams["id"]; ok && len(ids) == 1 && !enableFuzzyMatching {
-			rows, err = db.Query("SELECT * FROM "+table+" WHERE id = ?", ids[0])
-		} else {
-			rows, err = db.Query("SELECT * FROM " + table)
-		}
+		rows, err := db.Query("SELECT * FROM " + table)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		columnNames, _ := rows.Columns()
+		cols, _ := rows.Columns()
 		var results []map[string]any
 
 		for rows.Next() {
-			values := make([]any, len(columnNames))
+			values := make([]any, len(cols))
 			for i := range values {
 				values[i] = new(any)
 			}
@@ -128,8 +122,8 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 				continue
 			}
 
-			row := make(map[string]any, len(columnNames))
-			for i, name := range columnNames {
+			row := make(map[string]any, len(cols))
+			for i, name := range cols {
 				val := *(values[i].(*any))
 				if b, ok := val.([]byte); ok {
 					row[name] = string(b)
@@ -145,23 +139,44 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 					return
 				}
 
-				colVal := strings.ToLower(fmt.Sprint(row[key]))
-				queryVal := strings.ToLower(cleanRe.ReplaceAllString(vals[0], ""))
+				queryVal := cleanRe.ReplaceAllString(vals[0], "")
+				colVal := row[key]
 
-				if enableFuzzyMatching {
-					if !strings.Contains(colVal, queryVal) && fuzzy.RankMatch(queryVal, colVal) < FuzzyScore {
+				switch v := colVal.(type) {
+				case int64, int32, int:
+					q, err := fmt.Sscan(queryVal)
+					if err != nil || fmt.Sprint(v) != fmt.Sprint(q) {
 						matched = false
 						break
 					}
-				} else if colVal != queryVal {
-					matched = false
-					break
+				case float64, float32:
+					q, err := fmt.Sscan(queryVal)
+					if err != nil || fmt.Sprint(v) != fmt.Sprint(q) {
+						matched = false
+						break
+					}
+				case string:
+					cv := strings.ToLower(v)
+					qv := strings.ToLower(queryVal)
+					if enableFuzzy {
+						if !strings.Contains(cv, qv) && fuzzy.RankMatch(qv, cv) < FuzzyScore {
+							matched = false
+							break
+						}
+					} else if cv != qv {
+						matched = false
+						break
+					}
+				default:
+					if fmt.Sprint(v) != queryVal {
+						matched = false
+						break
+					}
 				}
 			}
 
 			if matched {
-				id := fmt.Sprint(row["id"])
-				row["image"] = fmt.Sprintf("Data/%s/%s.png", table, id)
+				row["image"] = fmt.Sprintf("Data/%s/%v.png", table, row["id"])
 				results = append(results, row)
 			}
 		}
@@ -175,14 +190,12 @@ func StartServer(dbFile string, addr string) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize DB and columns: %w", err)
 	}
-	defer db.Close()
 
 	for _, table := range tables {
 		http.HandleFunc("/"+table, handleQuery(db, table))
 		http.HandleFunc("/"+table+"/", handleQuery(db, table))
 	}
 
-	// log.Printf("Server running on %s", addr)
 	return http.ListenAndServe(addr, nil)
 }
 
