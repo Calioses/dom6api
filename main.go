@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,19 +16,18 @@ import (
 
 const (
 	DBFile        = "Data/dom6api.db"
-	SqlFile       = "create_tables.sql"
 	InspectorPort = 8001
 	APIPort       = 8002
 )
 
-func dbcheck(filename string, sqlFile string) *sql.DB {
-	base := "Data"
-	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
+//go:embed create_tables.sql
+var sqlFile []byte
 
-	for _, cat := range categories {
-		path := filepath.Join(base, cat)
-		if err := os.MkdirAll(path, os.ModePerm); err != nil {
-			log.Fatalf("could not create folder %s: %v", path, err)
+func dbcheck(filename string) *sql.DB {
+
+	for _, cat := range []string{"events", "items", "mercs", "sites", "spells", "units"} {
+		if err := os.MkdirAll(filepath.Join("Data", cat), os.ModePerm); err != nil {
+			log.Fatalf("could not create folder %s: %v", cat, err)
 		}
 	}
 
@@ -37,80 +37,58 @@ func dbcheck(filename string, sqlFile string) *sql.DB {
 		log.Fatalf("dbcheck: failed to open database: %v", err)
 	}
 
-	sqlBytes, err := os.ReadFile(sqlFile)
-	if err != nil {
-		log.Fatalf("dbcheck: failed to read SQL file: %v", err)
+	if _, err := db.Exec(string(sqlFile)); err != nil {
+		log.Fatalf("dbcheck: failed to execute SQL: %v", err)
 	}
 
-	sqlStatements := string(sqlBytes)
-	if _, err := db.Exec(sqlStatements); err != nil {
-		log.Fatalf("dbcheck: failed to execute SQL file: %v", err)
-	}
-
-	log.Println("dbcheck: SQL script executed successfully.")
+	log.Println("dbcheck: SQL executed successfully")
 	return db
 }
 
-var RunSeverIsTrueElseRunScrape = true //TODO agony
 func main() {
-	db := dbcheck(DBFile, SqlFile)
+	fmt.Println(`
+______ ________  ___   ____    ___  ______ _____ 
+|  _  \  _  |  \/  |  / ___|  / _ \ | ___ \_   _|
+| | | | | | | .  . | / /___  / /_\ \| |_/ / | |  
+| | | | | | | |\/| | | ___ \ |  _  ||  __/  | |  
+| |/ /\ \_/ / |  | | | \_/ | | | | || |    _| |_ 
+|___/  \___/\_|  |_/ \_____/ \_| |_/\_|    \___/ 
+                                                 
+MIT License
+Use, modify, and distribute freely, with credit to Monkeydew — the G.O.A.T.
+                                                 `)
+	db := dbcheck(DBFile)
 	defer db.Close()
 
-	if RunSeverIsTrueElseRunScrape {
-		go func() {
-			log.Printf("Starting Go server on http://localhost:%d ...", APIPort)
-			if err := StartServer(DBFile, fmt.Sprintf(":%d", APIPort)); err != nil {
-				log.Fatal("Go server failed:", err)
-			}
-		}()
-		log.Println("Go server launch initiated.")
-
-	} else {
-
+	if len(os.Args) > 1 && os.Args[1] == "build" {
 		folder := "dom6inspector"
-		if _, err := os.Stat(folder); os.IsNotExist(err) {
-			log.Println("Folder not found. Cloning repo...")
-			if err := exec.Command("git", "clone", "https://github.com/larzm42/dom6inspector", folder).Run(); err != nil {
-				log.Fatal("Failed to clone repo:", err)
-			}
+		os.RemoveAll(folder)
+		if err := exec.Command("git", "clone", "https://github.com/larzm42/dom6inspector", folder).Run(); err != nil {
+			log.Fatal("Clone failed:", err)
 		}
 
 		pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
-		pyCmd.Dir = folder
-		pyCmd.Stdout = os.Stdout
-		pyCmd.Stderr = os.Stderr
+		pyCmd.Dir, pyCmd.Stdout, pyCmd.Stderr = folder, os.Stdout, os.Stderr
 		if err := pyCmd.Start(); err != nil {
-			log.Fatal("Failed to start Python server:", err)
+			log.Fatal("Python server failed:", err)
 		}
-		log.Printf("Python server started at http://localhost:%d (PID %d)", InspectorPort, pyCmd.Process.Pid)
+		log.Printf("Python server at http://localhost:%d (PID %d)", InspectorPort, pyCmd.Process.Pid)
+		go pyCmd.Wait()
 
-		go func() {
-			if err := pyCmd.Wait(); err != nil {
-				log.Printf("Python server exited: %v", err)
-			}
-		}()
-
-		// Wait for server to respond (up to 5 seconds)
-		ready := false
 		for i := 0; i < 10; i++ {
-			resp, err := http.Get(fmt.Sprintf("http://localhost:%d", InspectorPort))
-			if err == nil {
+			if resp, err := http.Get(fmt.Sprintf("http://localhost:%d", InspectorPort)); err == nil {
 				resp.Body.Close()
-				ready = true
 				break
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
 
-		if !ready {
-			log.Fatal("Python server did not respond in time")
-		}
-
-		time.Sleep(5 * time.Second) // optional extra delay
-		log.Println("Scrape starting — Python server ready")
 		Scrape()
-
+		log.Println("Scrape complete.")
 	}
 
-	select {} // keep main alive
+	log.Printf("Starting Go server on http://0.0.0.0:%d ...", APIPort)
+	if err := StartServer(DBFile, fmt.Sprintf("0.0.0.0:%d", APIPort)); err != nil {
+		log.Fatal("Go server failed:", err)
+	}
 }

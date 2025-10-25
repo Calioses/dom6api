@@ -46,9 +46,6 @@ CREATE TABLE IF NOT EXISTS spells (
 	researchlevel TEXT  NOT NULL
 );
 
-
-
-
 CREATE TABLE IF NOT EXISTS events (
     ID INT NOT NULL PRIMARY KEY,
     name TEXT

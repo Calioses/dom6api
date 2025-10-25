@@ -168,15 +168,41 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 	}
 }
 
-func StartServer(dbFile string, addr string) error {
+func serveScreenshot(table string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idPart := strings.TrimPrefix(r.URL.Path, "/"+table+"/")
+		idPart = strings.TrimSuffix(idPart, "/screenshot")
+		id := cleanRe.ReplaceAllString(idPart, "")
+		if id == "" {
+			http.Error(w, "missing id", http.StatusBadRequest)
+			return
+		}
+
+		path := fmt.Sprintf("Data/%s/%s.png", table, id)
+		http.ServeFile(w, r, path)
+	}
+}
+
+func StartServer(dbFile, addr string) error {
 	db, err := initDB(dbFile, tables)
 	if err != nil {
 		return fmt.Errorf("failed to initialize DB and columns: %w", err)
 	}
 
+	mux := http.NewServeMux()
+
 	for _, table := range tables {
-		http.HandleFunc("/"+table+"/", handleQuery(db, table))
+		table := table
+		mux.HandleFunc("/"+table+"/", func(w http.ResponseWriter, r *http.Request) {
+			log.Println(r.URL.String())
+			if strings.HasSuffix(r.URL.Path, "/screenshot") {
+				serveScreenshot(table)(w, r)
+			} else {
+				handleQuery(db, table)(w, r)
+			}
+		})
 	}
 
-	return http.ListenAndServe(addr, nil)
+	log.Printf("Server listening on %s", addr)
+	return http.ListenAndServe(addr, mux)
 }

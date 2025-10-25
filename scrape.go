@@ -99,7 +99,7 @@ func Scrape() {
 			var entity map[string]interface{}
 			var err error
 
-			for retries := 0; retries < 5; retries++ {
+			for retries := 0; retries < 2; retries++ {
 				entityJSON, errEval := page.Evaluate(fmt.Sprintf(`(i)=>{
 				const e = DMI.modctx['%sdata'][i];
 				const overlay = document.querySelector('#%s-page div.fixed-overlay');
