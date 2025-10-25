@@ -9,13 +9,14 @@ CREATE TABLE IF NOT EXISTS items (
 );
 
 CREATE TABLE IF NOT EXISTS mercs (
-	id           INT  NOT NULL PRIMARY KEY,
-	name         TEXT NOT NULL COLLATE NOCASE,
-	bossname     TEXT NOT NULL COLLATE NOCASE,
-	commander_id INT  NOT NULL,
-	unit_id      INT  NOT NULL,
-	nrunits      INT  NOT NULL
+    id           INT  NOT NULL PRIMARY KEY,
+    name         TEXT NOT NULL COLLATE NOCASE,
+    bossname     TEXT NOT NULL COLLATE NOCASE,
+    com INT  NOT NULL,
+    unit      INT  NOT NULL,
+    nrunits      INT  NOT NULL
 );
+
 
 CREATE TABLE IF NOT EXISTS sites (
 	id      INT  NOT NULL PRIMARY KEY,
@@ -31,8 +32,8 @@ CREATE TABLE IF NOT EXISTS units (
 	name  TEXT NOT NULL COLLATE NOCASE,
 	hp    INT  NOT NULL,
 	size  INT  NOT NULL CHECK(size >= 1 AND size <= 10),
-    mount INT,
-	co_rider INT
+    mountmnr INT,
+	coridermnr  INT
 );
 
 CREATE TABLE IF NOT EXISTS spells (

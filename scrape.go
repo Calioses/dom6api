@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/playwright-community/playwright-go"
@@ -21,10 +22,38 @@ const (
 )
 
 var (
-	schoolMap = map[float64]string{1: "Conjuration", 2: "Alteration", 3: "Evocation", 4: "Construction", 5: "Enchantment", 6: "Thaumaturgy", 7: "Blood", 8: "Divine"}
-	rarities  = map[int]string{0: "Common", 1: "Uncommon", 2: "Rare", 5: "Never random", 11: "Throne lvl1", 12: "Throne lvl2", 13: "Throne lvl3"}
+	schoolMap = map[float64]string{
+		1: "Conjuration",
+		2: "Alteration",
+		3: "Evocation",
+		4: "Construction",
+		5: "Enchantment",
+		6: "Thaumaturgy",
+		7: "Blood",
+		8: "Divine",
+	}
+
+	rarities = map[int]string{
+		0:  "Common",
+		1:  "Uncommon",
+		2:  "Rare",
+		5:  "Never random",
+		11: "Throne lvl1",
+		12: "Throne lvl2",
+		13: "Throne lvl3",
+	}
+
+	categoryFields = map[string][]string{
+		// "item":  {"id", "name", "type", "constlevel", "mainlevel", "mpath", "gemcost"},
+		// "spell": {"id", "name", "gemcost", "mpath", "type", "school", "researchlevel"},
+		"unit": {"id", "name", "hp", "size", "mountmnr", "coridermnr"},
+		// "merc":  {"id", "name", "bossname", "com", "unit", "nrunits"},
+		// "site":  {"id", "name", "path", "level", "rarity"},
+		// "event": {"id", "name"},
+	}
 )
 
+// TODO add a slowdown rendering isn't finishing
 func dbcheck(filename string, sqlFile string) *sql.DB {
 	base := "Data"
 	categories := []string{"events", "items", "mercs", "sites", "spells", "units"}
@@ -58,120 +87,103 @@ func dbcheck(filename string, sqlFile string) *sql.DB {
 
 func main() {
 	scrape()
+	os.Exit(0)
 }
 
 func scrape() {
 	dbcheck(DBFile, SqlFile)
-	log.Println("Starting Playwright...")
+
 	pw, err := playwright.Run()
 	if err != nil {
 		log.Fatalf("main: could not start Playwright: %v", err)
 	}
-	defer pw.Stop()
 
-	log.Println("Launching Chromium...")
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
-	})
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
 	if err != nil {
 		log.Fatalf("main: could not launch browser: %v", err)
 	}
-	defer browser.Close()
 
-	log.Println("Creating new page...")
 	page, err := browser.NewPage()
 	if err != nil {
 		log.Fatalf("main: could not create page: %v", err)
 	}
 	page.SetViewportSize(800, 600)
 
-	url := "http://localhost:8001/?loadEvents=1"
-	log.Printf("Navigating to %s", url)
-	if _, err = page.Goto(url, playwright.PageGotoOptions{
+	if _, err = page.Goto("http://localhost:8001/?loadEvents=1", playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	}); err != nil {
-		log.Fatalf("main: could not goto url %s: %v", url, err)
+		log.Fatalf("main: could not goto url: %v", err)
 	}
 
 	db, err := sql.Open("sqlite3", "Data/dom6api.db")
 	if err != nil {
 		log.Fatalf("main: could not open db: %v", err)
 	}
-	defer db.Close()
-	// types     = []string{"item", "spell", "unit", "site", "merc", "event"}
 
-	var types = []string{"unit"}
+	for cat := range categoryFields {
+		log.Printf("Processing category: %s", cat)
 
-	for _, t := range types {
-		log.Printf("Clicking tab for %s...", t)
-		if _, err := page.Evaluate(fmt.Sprintf(`() => { document.getElementById('%s-page-button').click(); }`, t)); err != nil {
-			log.Fatalf("main: could not click tab for %s: %v", t, err)
-		}
+		fmt.Printf("Clicking page button for category %s\n", cat)
+		page.Click(fmt.Sprintf("#%s-page-button", cat))
 
-		selector := fmt.Sprintf("#%s-page div.fixed-overlay", t)
-		log.Printf("Waiting for overlay selector: %s", selector)
-		if _, err := page.WaitForSelector(selector); err != nil {
-			log.Fatalf("main: overlay selector not found for %s: %v", t, err)
-		}
+		fmt.Printf("Waiting for data for category %s\n", cat)
+		page.WaitForFunction(fmt.Sprintf(`
+        () => DMI.modctx['%sdata'] && DMI.modctx['%sdata'].length > 0
+    `, cat, cat), playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)})
 
-		exprCount := fmt.Sprintf(`() => DMI.modctx['%sdata'].length`, t)
-		result, _ := page.Evaluate(exprCount)
-		var count int
-		switch v := result.(type) {
-		case float64:
-			count = int(v)
-		case int:
-			count = v
-		default:
-			log.Fatalf("main: unexpected type for count: %T", v)
-		}
-		log.Printf("%d entities found for %s", count, t)
+		countAny, _ := page.Evaluate(fmt.Sprintf(`() => DMI.modctx['%sdata'].length`, cat))
+		count := int(countAny.(int))
+		selector := fmt.Sprintf("#%s-page div.fixed-overlay", cat)
 
 		for i := 0; i < count; i++ {
-			entityAny, err := page.Evaluate(fmt.Sprintf(`(i) => {
-	const e = DMI.modctx['%sdata'][i];
-	const container = document.querySelector('#%s-page div.fixed-overlay');
-	container.innerHTML = e.renderOverlay(e).outerHTML || e.renderOverlay(e);
-	return e;
-}`, t, t), i)
-			if err != nil {
-				log.Printf("main: could not render entity %d for %s: %v", i, t, err)
-				continue
-			}
+			fmt.Printf("Rendering entity %d/%d for category %s\n", i+1, count, cat)
+			var entity interface{}
+			var err error
 
-			overlaySelector := fmt.Sprintf("#%s-page div.fixed-overlay", t)
-			_, err = page.WaitForFunction(
-				fmt.Sprintf(`() => {
-		const el = document.querySelector('%s');
-		return el && el.innerHTML.trim().length > 0;
-	}`, overlaySelector),
-				nil, // you can pass nil as the second argument
-				playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}, // optional timeout
-			)
-			if err != nil {
-				log.Printf("main: overlay did not render for %s entity %d: %v", t, i, err)
-				continue
-			}
+			for retries := 0; retries < 5; retries++ {
+				entity, err = page.Evaluate(fmt.Sprintf(`(i)=>{
+				const e = DMI.modctx['%sdata'][i];
+				const o = document.querySelector('#%s-page div.fixed-overlay');
+				return new Promise(resolve=>{
+					const f = ()=>{
+						const rendered = e.renderOverlay(e);
+						o.innerHTML = rendered?.outerHTML || "";
+						if(o.innerHTML.trim().length > 0) resolve(e);
+						else setTimeout(f, 200);
+					};
+					f();
+				});
+			}`, cat, cat), i)
 
-			entityMap, ok := entityAny.(map[string]interface{})
-			if !ok {
-				log.Printf("main: entity %d for %s is not a map, skipping", i, t)
-				continue
-			}
-
-			entityID := fmt.Sprintf("%v", entityMap["id"])
-			overlay, _ := page.QuerySelector(selector)
-
-			path := filepath.Join("Data", t+"s", entityID+".png")
-			for attempt := 1; attempt <= 3; attempt++ {
-				if _, err := overlay.Screenshot(playwright.ElementHandleScreenshotOptions{Path: playwright.String(path)}); err == nil {
+				if err == nil {
 					break
 				}
+				fmt.Printf("Retrying render for entity %d: %v\n", i, err)
+				time.Sleep(500 * time.Millisecond)
 			}
 
-			populate(page, db, t, i) // reuse open DB
+			if err != nil {
+				fmt.Printf("Failed to render entity %d after retries: %v\n", i, err)
+				continue
+			}
 
-			log.Printf("[%s] Rendering entity %d/%d...", t, i+1, count)
+			entityMap, ok := entity.(map[string]interface{})
+			if !ok {
+				fmt.Printf("Entity %d not a map, skipping\n", i)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+
+			path := filepath.Join("Data", cat+"s", fmt.Sprintf("%v.png", entityMap["id"]))
+			if el, err := page.QuerySelector(selector); err == nil && el != nil {
+				fmt.Printf("Taking screenshot for entity %d, saving to %s\n", i, path)
+				el.Screenshot(playwright.ElementHandleScreenshotOptions{Path: playwright.String(path)})
+			}
+
+			fmt.Printf("Populating database for entity %d/%d\n", i+1, count)
+			populate(page, db, cat, i)
+			fmt.Printf("[%s] Rendered entity %d/%d\n", cat, i+1, count)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
@@ -213,53 +225,10 @@ func populate(page playwright.Page, db *sql.DB, category string, entityIndex int
 		}
 
 	case "site":
-		if f, ok := entityMap["rarity"].(float64); ok {
-			if mapped, exists := rarities[int(f)]; exists {
-				entityMap["rarity"] = mapped
-			}
+		if r, ok := entityMap["rarity"].(int); ok {
+			entityMap["rarity"] = rarities[r]
 		}
 
-	case "unit":
-
-		idVal, ok := entityMap["id"]
-		if idVal == 150 {
-			jsonData, err := page.Evaluate(fmt.Sprintf(`() => JSON.stringify(DMI.modctx['%sdata'][%d], null, 2)`, category, entityIndex))
-			if err != nil {
-				log.Printf("populate: failed to fetch JSON for %s #%d: %v", category, entityIndex, err)
-				return
-			}
-			log.Printf("unit JSON:\n%s", jsonData)
-		}
-
-		if !ok {
-			log.Printf("populate: skipping unit, missing id")
-			return
-		}
-		id, err := strconv.Atoi(fmt.Sprintf("%v", idVal))
-		if err != nil {
-			log.Printf("populate: skipping unit, invalid id: %v", idVal)
-			return
-		}
-
-		name, _ := entityMap["name"].(string)
-		hp, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["hp"]))
-		size, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["size"]))
-		mount, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["mount"]))
-		rider, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["rider"]))
-		coRider, _ := strconv.Atoi(fmt.Sprintf("%v", entityMap["co_rider"]))
-
-		log.Printf("unit: id=%d name=%s hp=%d size=%d mount=%d rider=%d co_rider=%d",
-			id, name, hp, size, mount, rider, coRider)
-
-	}
-
-	categoryFields := map[string][]string{
-		"item":  {"id", "name", "type", "constlevel", "mainlevel", "mpath", "gemcost"},
-		"spell": {"id", "name", "gemcost", "mpath", "type", "school", "researchlevel"},
-		"unit":  {"id", "fullname", "hp", "size", "mount", "rider", "co_rider"},
-		"merc":  {"id", "name", "bossname", "com", "unit", "nrunits"},
-		"site":  {"id", "name", "path", "level", "rarity"},
-		"event": {"id", "name"},
 	}
 
 	fields, ok := categoryFields[category]
@@ -280,12 +249,17 @@ func populate(page playwright.Page, db *sql.DB, category string, entityIndex int
 		log.Printf("populate: could not prepare insert for %s: %v", category, err)
 		return
 	}
-	defer stmt.Close()
 
 	values := make([]interface{}, len(fields))
 	for i, f := range fields {
-		values[i] = fmt.Sprintf("%v", entityMap[f])
+		switch v := entityMap[f].(type) {
+		case float64:
+			values[i] = int(v)
+		default:
+			values[i] = v
+		}
 	}
+
 	if _, err := stmt.Exec(values...); err != nil {
 		log.Printf("populate: exec error for %s: %v", category, err)
 	}
