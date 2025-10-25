@@ -160,7 +160,7 @@ func handleQuery(db *sql.DB, table string) http.HandlerFunc {
 				}
 			}
 
-			row["image"] = fmt.Sprintf("Data/%s/%v.png", table, row["id"])
+			row["image"] = fmt.Sprintf("/%s/%v/screenshot", table, row["id"])
 			results = append(results, row)
 		}
 
