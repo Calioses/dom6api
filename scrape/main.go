@@ -27,7 +27,6 @@ const (
 var sqlFile []byte
 
 func dbcheck(filename string) *sql.DB {
-
 	for _, cat := range []string{"events", "items", "mercs", "sites", "spells", "units"} {
 		if err := os.MkdirAll(filepath.Join("Data", cat), os.ModePerm); err != nil {
 			log.Fatalf("could not create folder %s: %v", cat, err)
@@ -47,6 +46,7 @@ func dbcheck(filename string) *sql.DB {
 	log.Println("dbcheck: SQL executed successfully")
 	return db
 }
+
 func tarFolder(src, dest string) error {
 	file, err := os.Create(dest)
 	if err != nil {
@@ -114,6 +114,11 @@ Use, modify, and distribute freely, with credit to Monkeydew — the G.O.A.T.
 	os.RemoveAll(folder)
 	if err := exec.Command("git", "clone", "https://github.com/larzm42/dom6inspector", folder).Run(); err != nil {
 		log.Fatal("Clone failed:", err)
+	}
+
+	cmd := exec.Command("go", "run", "github.com/playwright-community/playwright-go/cmd/playwright", "install", "--with-deps")
+	if err := cmd.Run(); err != nil {
+		log.Fatal("Could not install Playwright driver:", err)
 	}
 
 	pyCmd := exec.Command("python", "-m", "http.server", fmt.Sprint(InspectorPort))
